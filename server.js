@@ -7,6 +7,7 @@ const passport = require('passport');
 const DiscordStrategy = require('passport-discord').Strategy;
 const cookieParser = require('cookie-parser');
 const session = require('express-session');
+const MongoStore = require('connect-mongo');
 const rateLimit = require('express-rate-limit');
 const app = express();
 const port = process.env.PORT || 3000;
@@ -34,6 +35,10 @@ app.use(session({
   secret: process.env.SESSION_SECRET || 'session-secret-key',
   resave: false,
   saveUninitialized: false,
+  store: MongoStore.create({
+    mongoUrl: process.env.MONGO_URI,
+    collectionName: 'sessions'
+  }),
   cookie: { secure: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 }
 }));
 app.use(passport.initialize());
@@ -101,14 +106,14 @@ const authenticateJWT = async (req, res, next) => {
     next();
   } catch (err) {
     console.error('JWT verification error for path:', req.path, 'Error:', err.message);
-    res.status(401).json({ error: 'Invalid token' });
+    return res.status(401).json({ error: 'Invalid token' });
   }
 };
 
-// Rate limit for /balance to prevent excessive requests
+// Rate limit for /balance
 const balanceLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit to 100 requests per window
+  max: 100,
   message: 'Too many requests to /balance, please try again later'
 });
 
@@ -185,25 +190,25 @@ app.get('/check-auth', authenticateJWT, (req, res) => {
 
 // Connect Discord
 app.get('/auth/discord', authenticateJWT, (req, res, next) => {
-  console.log('Initiating Discord auth for user:', req.jwtUser.username, 'Setting jwtUserId:', req.jwtUser._id);
+  console.log('Initiating Discord auth for user:', req.jwtUser.username, 'Setting jwtUserId:', req.jwtUser._id, 'Session ID:', req.sessionID);
   req.session.jwtUserId = req.jwtUser._id.toString();
   req.session.save(err => {
     if (err) {
       console.error('Session save error in /auth/discord:', err);
       return res.status(500).json({ error: 'Session error' });
     }
-    console.log('Session saved with jwtUserId:', req.session.jwtUserId);
+    console.log('Session saved with jwtUserId:', req.session.jwtUserId, 'Session ID:', req.sessionID);
     passport.authenticate('discord')(req, res, next);
   });
 });
 
 app.get('/auth/discord/callback', authenticateJWT, passport.authenticate('discord', { failureRedirect: '/' }), async (req, res) => {
   try {
-    console.log('Discord callback session:', req.session);
+    console.log('Discord callback session:', req.session, 'Session ID:', req.sessionID);
     const discordId = req.user.id; // From Discord profile
     const userId = req.session.jwtUserId;
     if (!userId) {
-      console.log('No jwtUserId found in session');
+      console.log('No jwtUserId found in session for Session ID:', req.sessionID);
       return res.status(401).json({ error: 'User session lost' });
     }
     const user = await User.findById(userId);
