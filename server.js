@@ -10,6 +10,9 @@ const session = require('express-session');
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Set Mongoose strictQuery to suppress deprecation warning
+mongoose.set('strictQuery', true);
+
 // Middleware
 app.use(cors({
   origin: 'https://blackjack-frontend-lilac.vercel.app',
@@ -70,13 +73,21 @@ passport.deserializeUser((user, done) => done(null, user));
 // JWT Middleware
 const authenticateJWT = async (req, res, next) => {
   const token = req.cookies.token;
-  if (!token) return res.status(401).json({ error: 'Not authenticated' });
+  if (!token) {
+    console.log('No JWT token found in cookies');
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'jwt-secret-key');
-    req.user = await User.findById(decoded.userId);
-    if (!req.user) return res.status(401).json({ error: 'User not found' });
+    const user = await User.findById(decoded.userId);
+    if (!user) {
+      console.log('User not found for ID:', decoded.userId);
+      return res.status(401).json({ error: 'User not found' });
+    }
+    req.jwtUser = user; // Store JWT user separately to avoid Passport conflict
     next();
   } catch (err) {
+    console.error('JWT verification error:', err);
     res.status(401).json({ error: 'Invalid token' });
   }
 };
@@ -137,25 +148,41 @@ app.get('/check-auth', authenticateJWT, (req, res) => {
   res.json({
     authenticated: true,
     user: {
-      username: req.user.username,
-      email: req.user.email,
-      discordConnected: !!req.user.discordId
+      username: req.jwtUser.username,
+      email: req.jwtUser.email,
+      discordConnected: !!req.jwtUser.discordId
     }
   });
 });
 
 // Connect Discord
-app.get('/auth/discord', authenticateJWT, passport.authenticate('discord'));
+app.get('/auth/discord', authenticateJWT, (req, res, next) => {
+  req.session.jwtUserId = req.jwtUser._id; // Store user ID in session
+  passport.authenticate('discord')(req, res, next);
+});
+
 app.get('/auth/discord/callback', authenticateJWT, passport.authenticate('discord', { failureRedirect: '/' }), async (req, res) => {
   try {
     const discordId = req.user.id; // From Discord profile
+    const userId = req.session.jwtUserId; // Retrieve user ID from session
+    if (!userId) {
+      console.log('No jwtUserId found in session');
+      return res.status(401).json({ error: 'User session lost' });
+    }
+    const user = await User.findById(userId);
+    if (!user) {
+      console.log('User not found for ID:', userId);
+      return res.status(401).json({ error: 'User not found' });
+    }
     const existingUser = await User.findOne({ discordId });
-    if (existingUser && existingUser._id.toString() !== req.user._id.toString()) {
+    if (existingUser && existingUser._id.toString() !== user._id.toString()) {
       return res.status(400).json({ error: 'Discord account already linked to another user' });
     }
-    req.user.discordId = discordId;
-    req.user.avatar = req.user.avatar || `https://cdn.discordapp.com/avatars/${discordId}/${req.user.avatar}.png`;
-    await req.user.save();
+    user.discordId = discordId;
+    user.avatar = user.avatar || `https://cdn.discordapp.com/avatars/${discordId}/${req.user.avatar}.png`;
+    await user.save();
+    console.log(`Discord connected for user: ${user.username}, discordId: ${discordId}`);
+    delete req.session.jwtUserId; // Clean up session
     res.redirect('https://blackjack-frontend-lilac.vercel.app/?page=profil');
   } catch (err) {
     console.error('Discord connect error:', err);
@@ -166,15 +193,15 @@ app.get('/auth/discord/callback', authenticateJWT, passport.authenticate('discor
 // User Info
 app.get('/profile', authenticateJWT, (req, res) => {
   res.json({
-    username: req.user.username,
-    email: req.user.email,
-    avatar: req.user.avatar,
-    chips: req.user.chips,
-    gamesPlayed: req.user.gamesPlayed,
-    wins: req.user.wins,
-    losses: req.user.losses,
-    totalBets: req.user.totalBets,
-    discordConnected: !!req.user.discordId
+    username: req.jwtUser.username,
+    email: req.jwtUser.email,
+    avatar: req.jwtUser.avatar,
+    chips: req.jwtUser.chips,
+    gamesPlayed: req.jwtUser.gamesPlayed,
+    wins: req.jwtUser.wins,
+    losses: req.jwtUser.losses,
+    totalBets: req.jwtUser.totalBets,
+    discordConnected: !!req.jwtUser.discordId
   });
 });
 
@@ -199,22 +226,22 @@ app.get('/leaderboard', async (req, res) => {
 
 // Balance
 app.get('/balance', authenticateJWT, (req, res) => {
-  res.json({ chips: req.user.chips });
+  res.json({ chips: req.jwtUser.chips });
 });
 
 // Blackjack Game
 app.post('/game/bet', authenticateJWT, async (req, res) => {
-  if (!req.user.discordId) return res.status(403).json({ error: 'Connect Discord to play' });
+  if (!req.jwtUser.discordId) return res.status(403).json({ error: 'Connect Discord to play' });
   const { bet } = req.body;
-  if (!bet || bet <= 0 || bet > req.user.chips) {
+  if (!bet || bet <= 0 || bet > req.jwtUser.chips) {
     return res.status(400).json({ error: 'Invalid bet' });
   }
   try {
-    req.user.chips -= bet;
-    req.user.gamesPlayed += 1;
-    req.user.totalBets += bet;
-    await req.user.save();
-    res.json({ chips: req.user.chips, bet });
+    req.jwtUser.chips -= bet;
+    req.jwtUser.gamesPlayed += 1;
+    req.jwtUser.totalBets += bet;
+    await req.jwtUser.save();
+    res.json({ chips: req.jwtUser.chips, bet });
   } catch (err) {
     console.error('Error placing bet:', err);
     res.status(500).json({ error: 'Server error' });
@@ -223,17 +250,17 @@ app.post('/game/bet', authenticateJWT, async (req, res) => {
 
 // Update game result
 app.post('/game/result', authenticateJWT, async (req, res) => {
-  if (!req.user.discordId) return res.status(403).json({ error: 'Connect Discord to play' });
+  if (!req.jwtUser.discordId) return res.status(403).json({ error: 'Connect Discord to play' });
   const { won, chipsWon } = req.body;
   try {
     if (won) {
-      req.user.wins += 1;
-      req.user.chips += chipsWon;
+      req.jwtUser.wins += 1;
+      req.jwtUser.chips += chipsWon;
     } else {
-      req.user.losses += 1;
+      req.jwtUser.losses += 1;
     }
-    await req.user.save();
-    res.json({ chips: req.user.chips });
+    await req.jwtUser.save();
+    res.json({ chips: req.jwtUser.chips });
   } catch (err) {
     console.error('Error updating game result:', err);
     res.status(500).json({ error: 'Server error' });
