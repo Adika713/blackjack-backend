@@ -11,21 +11,36 @@ const port = process.env.PORT || 3000;
 // Middleware
 app.use(cors({
   origin: 'https://blackjack-frontend-lilac.vercel.app',
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
 app.use(session({
   secret: process.env.SESSION_SECRET || 'your-secret-key',
   resave: false,
   saveUninitialized: false,
-  store: MongoStore.create({ mongoUrl: process.env.MONGO_URI }),
+  store: MongoStore.create({
+    mongoUrl: process.env.MONGO_URI,
+    collectionName: 'sessions'
+  }),
   cookie: {
     secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    sameSite: 'lax',
     maxAge: 24 * 60 * 60 * 1000 // 24 hours
   }
 }));
 app.use(passport.initialize());
 app.use(passport.session());
+
+// Debug session middleware
+app.use((req, res, next) => {
+  console.log('Session ID:', req.sessionID);
+  console.log('User:', req.user);
+  console.log('Authenticated:', req.isAuthenticated());
+  next();
+});
 
 // MongoDB connection
 const mongoUri = process.env.MONGO_URI;
@@ -51,7 +66,7 @@ const User = mongoose.model('User', userSchema);
 passport.use(new DiscordStrategy({
   clientID: process.env.DISCORD_CLIENT_ID,
   clientSecret: process.env.DISCORD_CLIENT_SECRET,
-  callbackURL: process.env.DISCORD_CALLBACK_URL || 'http://localhost:3000/auth/discord/callback',
+  callbackURL: 'https://blackjack-backend-aew7.onrender.com/auth/discord/callback',
   scope: ['identify']
 }, async (accessToken, refreshToken, profile, done) => {
   try {
@@ -90,8 +105,9 @@ app.get('/auth/discord', passport.authenticate('discord'));
 app.get('/auth/discord/callback', passport.authenticate('discord', {
   failureRedirect: 'https://blackjack-frontend-lilac.vercel.app'
 }), (req, res) => {
+  console.log('Callback: User authenticated:', req.user);
   res.redirect('https://blackjack-frontend-lilac.vercel.app');
-});
+}));
 
 // User Info
 app.get('/profile', (req, res) => {
@@ -139,7 +155,7 @@ app.get('/balance', (req, res) => {
   }
 });
 
-// Blackjack Game (simplified)
+// Blackjack Game
 app.post('/game/bet', async (req, res) => {
   if (!req.isAuthenticated()) return res.status(401).json({ error: 'Not authenticated' });
   const { bet } = req.body;
