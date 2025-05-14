@@ -9,6 +9,7 @@ const cookieParser = require('cookie-parser');
 const session = require('express-session');
 const MongoStore = require('connect-mongo');
 const rateLimit = require('express-rate-limit');
+const crypto = require('crypto');
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -39,8 +40,10 @@ app.use(session({
   store: MongoStore.create({
     mongoUrl: process.env.MONGO_URI,
     collectionName: 'sessions',
-    ttl: 24 * 60 * 60, // 1 day
+    ttl: 24 * 60 * 60,
     autoRemove: 'native'
+  }, err => {
+    if (err) console.error('MongoStore initialization error:', err);
   }),
   cookie: { secure: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 }
 }));
@@ -74,7 +77,8 @@ passport.use(new DiscordStrategy({
   clientID: process.env.DISCORD_CLIENT_ID,
   clientSecret: process.env.DISCORD_CLIENT_SECRET,
   callbackURL: 'https://blackjack-backend-aew7.onrender.com/auth/discord/callback',
-  scope: ['identify']
+  scope: ['identify'],
+  state: true
 }, async (accessToken, refreshToken, profile, done) => {
   try {
     return done(null, profile);
@@ -115,7 +119,7 @@ const authenticateJWT = async (req, res, next) => {
 
 // Rate limit for /balance
 const balanceLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 100,
   message: 'Too many requests to /balance, please try again later'
 });
@@ -194,40 +198,55 @@ app.get('/check-auth', authenticateJWT, (req, res) => {
 // Connect Discord
 app.get('/auth/discord', authenticateJWT, (req, res, next) => {
   console.log('Initiating Discord auth for user:', req.jwtUser.username, 'Setting jwtUserId:', req.jwtUser._id, 'Session ID:', req.sessionID);
+  const state = crypto.randomBytes(16).toString('hex');
   req.session.jwtUserId = req.jwtUser._id.toString();
+  req.session.state = state;
   req.session.save(err => {
     if (err) {
       console.error('Session save error in /auth/discord:', err);
       return res.status(500).json({ error: 'Session error' });
     }
-    console.log('Session saved with jwtUserId:', req.session.jwtUserId, 'Session ID:', req.sessionID);
-    passport.authenticate('discord')(req, res, next);
+    console.log('Session saved with jwtUserId:', req.session.jwtUserId, 'State:', state, 'Session ID:', req.sessionID);
+    passport.authenticate('discord', { state })(req, res, next);
   });
 });
 
 app.get('/auth/discord/callback', passport.authenticate('discord', { failureRedirect: '/' }), async (req, res) => {
   try {
     console.log('Discord callback session:', req.session, 'Session ID:', req.sessionID);
-    const discordId = req.user.id; // From Discord profile
+    const receivedState = req.query.state;
+    const storedState = req.session.state;
     const userId = req.session.jwtUserId;
+    
+    if (!receivedState || receivedState !== storedState) {
+      console.log('Invalid state parameter for Session ID:', req.sessionID);
+      return res.status(401).json({ error: 'Invalid state' });
+    }
+    
     if (!userId) {
       console.log('No jwtUserId found in session for Session ID:', req.sessionID);
       return res.status(401).json({ error: 'User session lost' });
     }
+    
+    const discordId = req.user.id; // From Discord profile
     const user = await User.findById(userId);
     if (!user) {
       console.log('User not found for ID:', userId);
       return res.status(401).json({ error: 'User not found' });
     }
+    
     const existingUser = await User.findOne({ discordId });
     if (existingUser && existingUser._id.toString() !== user._id.toString()) {
       return res.status(400).json({ error: 'Discord account already linked to another user' });
     }
+    
     user.discordId = discordId;
     user.avatar = user.avatar || `https://cdn.discordapp.com/avatars/${discordId}/${req.user.avatar}.png`;
     await user.save();
     console.log(`Discord connected for user: ${user.username}, discordId: ${discordId}`);
+    
     delete req.session.jwtUserId;
+    delete req.session.state;
     req.session.save(err => {
       if (err) {
         console.error('Session save error in /auth/discord/callback:', err);
