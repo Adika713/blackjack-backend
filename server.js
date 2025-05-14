@@ -78,9 +78,9 @@ app.get('/', (req, res) => {
 // Discord Auth
 app.get('/auth/discord', passport.authenticate('discord'));
 app.get('/auth/discord/callback', passport.authenticate('discord', {
-  failureRedirect: 'https://blackjack-frontend.vercel.app' // Replace with your Vercel URL
+  failureRedirect: 'https://blackjack-frontend-lilac.vercel.app/' // Replace with your Vercel URL
 }), (req, res) => {
-  res.redirect('https://blackjack-frontend.vercel.app'); // Replace with your Vercel URL
+  res.redirect('https://blackjack-frontend-lilac.vercel.app/'); // Replace with your Vercel URL
 });
 
 // User Info
