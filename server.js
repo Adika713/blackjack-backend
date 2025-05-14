@@ -25,9 +25,9 @@ app.use(session({
     collectionName: 'sessions'
   }),
   cookie: {
-    secure: true, // Required for cross-origin cookies
+    secure: true,
     httpOnly: true,
-    sameSite: 'none', // Allow cross-origin cookie sharing
+    sameSite: 'none',
     maxAge: 24 * 60 * 60 * 1000 // 24 hours
   }
 }));
@@ -115,7 +115,7 @@ app.get('/auth/discord/callback', passport.authenticate('discord', {
   failureRedirect: 'https://blackjack-frontend-lilac.vercel.app'
 }), (req, res) => {
   console.log(`[${new Date().toISOString()}] Callback: User authenticated: ${req.user.username}`);
-  res.redirect('https://blackjack-frontend-lilac.vercel.app/profil');
+  res.redirect('https://blackjack-frontend-lilac.vercel.app/?page=profil');
 });
 
 // User Info
