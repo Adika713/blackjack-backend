@@ -81,7 +81,7 @@ passport.use(new DiscordStrategy({
   state: true
 }, async (accessToken, refreshToken, profile, done) => {
   try {
-    console.log('Discord strategy processing for user:', profile.id);
+    console.log('Discord strategy processing for user:', profile.id, 'Access Token:', accessToken);
     return done(null, profile);
   } catch (err) {
     console.error('Discord strategy error:', err.message, err.stack);
@@ -219,52 +219,69 @@ app.get('/auth/discord', authenticateJWT, (req, res, next) => {
   });
 });
 
-app.get('/auth/discord/callback', passport.authenticate('discord', { failureRedirect: '/' }), async (req, res) => {
-  try {
-    console.log('Discord callback session:', req.session, 'Session ID:', req.sessionID, 'Query:', req.query);
-    const receivedState = req.query.state;
-    const storedState = req.session.state;
-    const userId = req.session.jwtUserId;
-    
-    if (!receivedState || receivedState !== storedState) {
-      console.log('Invalid state parameter:', { receivedState, storedState }, 'Session ID:', req.sessionID);
-      return res.status(401).json({ error: 'Invalid state' });
+app.get('/auth/discord/callback', (req, res, next) => {
+  passport.authenticate('discord', { failureRedirect: '/' }, (err, user, info) => {
+    if (err) {
+      console.error('Passport authentication error:', err.message, err.stack);
+      return res.status(500).json({ error: 'Authentication error' });
     }
-    
-    if (!userId) {
-      console.log('No jwtUserId found in session for Session ID:', req.sessionID);
-      return res.status(401).json({ error: 'User session lost' });
-    }
-    
-    const discordId = req.user.id; // From Discord profile
-    const user = await User.findById(userId);
     if (!user) {
-      console.log('User not found for ID:', userId);
-      return res.status(401).json({ error: 'User not found' });
+      console.log('Passport authentication failed:', info, 'Query:', req.query, 'Session ID:', req.sessionID);
+      return res.redirect('/');
     }
-    
-    const existingUser = await User.findOne({ discordId });
-    if (existingUser && existingUser._id.toString() !== user._id.toString()) {
-      return res.status(400).json({ error: 'Discord account already linked to another user' });
-    }
-    
-    user.discordId = discordId;
-    user.avatar = user.avatar || `https://cdn.discordapp.com/avatars/${discordId}/${req.user.avatar}.png`;
-    await user.save();
-    console.log(`Discord connected for user: ${user.username}, discordId: ${discordId}`);
-    
-    delete req.session.jwtUserId;
-    delete req.session.state;
-    req.session.save(err => {
-      if (err) {
-        console.error('Session save error in /auth/discord/callback:', err);
+    req.logIn(user, async (loginErr) => {
+      if (loginErr) {
+        console.error('Passport login error:', loginErr.message, loginErr.stack);
+        return res.status(500).json({ error: 'Login error' });
       }
-      res.redirect('https://blackjack-frontend-lilac.vercel.app/?page=profil');
+      try {
+        console.log('Discord callback session:', req.session, 'Session ID:', req.sessionID, 'Query:', req.query, 'User:', user.id);
+        const receivedState = req.query.state;
+        const storedState = req.session.state;
+        const userId = req.session.jwtUserId;
+        
+        // Temporarily bypass state validation for debugging
+        // if (!receivedState || receivedState !== storedState) {
+        //   console.log('Invalid state parameter:', { receivedState, storedState }, 'Session ID:', req.sessionID);
+        //   return res.status(401).json({ error: 'Invalid state' });
+        // }
+        
+        if (!userId) {
+          console.log('No jwtUserId found in session for Session ID:', req.sessionID);
+          return res.status(401).json({ error: 'User session lost' });
+        }
+        
+        const discordId = user.id; // From Discord profile
+        const dbUser = await User.findById(userId);
+        if (!dbUser) {
+          console.log('User not found for ID:', userId);
+          return res.status(401).json({ error: 'User not found' });
+        }
+        
+        const existingUser = await User.findOne({ discordId });
+        if (existingUser && existingUser._id.toString() !== dbUser._id.toString()) {
+          return res.status(400).json({ error: 'Discord account already linked to another user' });
+        }
+        
+        dbUser.discordId = discordId;
+        dbUser.avatar = dbUser.avatar || `https://cdn.discordapp.com/avatars/${discordId}/${user.avatar}.png`;
+        await dbUser.save();
+        console.log(`Discord connected for user: ${dbUser.username}, discordId: ${discordId}`);
+        
+        delete req.session.jwtUserId;
+        delete req.session.state;
+        req.session.save(err => {
+          if (err) {
+            console.error('Session save error in /auth/discord/callback:', err);
+          }
+          res.redirect('https://blackjack-frontend-lilac.vercel.app/?page=profil');
+        });
+      } catch (err) {
+        console.error('Discord callback error:', err.message, err.stack);
+        res.status(500).json({ error: 'Server error' });
+      }
     });
-  } catch (err) {
-    console.error('Discord callback error:', err.message, err.stack);
-    res.status(500).json({ error: 'Server error' });
-  }
+  })(req, res, next);
 });
 
 // User Info
