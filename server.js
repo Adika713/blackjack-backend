@@ -74,9 +74,9 @@ passport.deserializeUser(async (id, done) => {
 // Discord Auth
 app.get('/auth/discord', passport.authenticate('discord'));
 app.get('/auth/discord/callback', passport.authenticate('discord', {
-  failureRedirect: '/'
+  failureRedirect: 'https://blackjack-frontend-lilac.vercel.app/'
 }), (req, res) => {
-  res.redirect('/'); // Redirect to frontend
+  res.redirect('https://blackjack-frontend-lilac.vercel.app/'); // Redirect to frontend
 });
 
 // User Info
