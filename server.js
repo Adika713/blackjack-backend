@@ -1,10 +1,10 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const passport = require('passport');
 const DiscordStrategy = require('passport-discord').Strategy;
-const session = require('express-session');
-const MongoStore = require('connect-mongo');
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -16,31 +16,6 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'your-secret-key',
-  resave: false,
-  saveUninitialized: false,
-  store: MongoStore.create({
-    mongoUrl: process.env.MONGO_URI,
-    collectionName: 'sessions'
-  }),
-  cookie: {
-    secure: true,
-    httpOnly: true,
-    sameSite: 'none',
-    maxAge: 24 * 60 * 60 * 1000 // 24 hours
-  }
-}));
-app.use(passport.initialize());
-app.use(passport.session());
-
-// Debug session middleware
-app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] Session ID: ${req.sessionID}`);
-  console.log(`[${new Date().toISOString()}] User: ${req.user ? req.user.username : 'None'}`);
-  console.log(`[${new Date().toISOString()}] Authenticated: ${req.isAuthenticated()}`);
-  next();
-});
 
 // MongoDB connection
 const mongoUri = process.env.MONGO_URI;
@@ -48,10 +23,12 @@ mongoose.connect(mongoUri, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('MongoDB connection error:', err));
 
-// Schemas
+// User Schema
 const userSchema = new mongoose.Schema({
-  discordId: { type: String, required: true, unique: true },
-  username: { type: String, required: true },
+  username: { type: String, required: true, unique: true, match: /^[a-zA-Z0-9_]{3,20}$/ },
+  email: { type: String, required: true, unique: true, match: /^[^\s@]+@[^\s@]+\.[^\s@]+$/ },
+  password: { type: String, required: true },
+  discordId: { type: String, unique: true, sparse: true },
   avatar: String,
   chips: { type: Number, default: 1000 },
   gamesPlayed: { type: Number, default: 0 },
@@ -70,70 +47,125 @@ passport.use(new DiscordStrategy({
   scope: ['identify']
 }, async (accessToken, refreshToken, profile, done) => {
   try {
-    let user = await User.findOne({ discordId: profile.id });
-    if (!user) {
-      user = new User({
-        discordId: profile.id,
-        username: profile.username,
-        avatar: profile.avatar ? `https://cdn.discordapp.com/avatars/${profile.id}/${profile.avatar}.png` : null
-      });
-      await user.save();
-    }
-    return done(null, user);
+    return done(null, profile);
   } catch (err) {
     return done(err, null);
   }
 }));
 
-passport.serializeUser((user, done) => done(null, user.id));
-passport.deserializeUser(async (id, done) => {
+passport.serializeUser((user, done) => done(null, user));
+passport.deserializeUser((user, done) => done(null, user));
+app.use(passport.initialize());
+
+// JWT Middleware
+const authenticateJWT = async (req, res, next) => {
+  const token = req.cookies.token;
+  if (!token) return res.status(401).json({ error: 'Not authenticated' });
   try {
-    const user = await User.findById(id);
-    done(null, user);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'jwt-secret-key');
+    req.user = await User.findById(decoded.userId);
+    if (!req.user) return res.status(401).json({ error: 'User not found' });
+    next();
   } catch (err) {
-    done(err, null);
+    res.status(401).json({ error: 'Invalid token' });
   }
-});
+};
 
 // Routes
 app.get('/', (req, res) => {
   res.send('Blackjack Backend Running');
 });
 
-// Check Authentication
-app.get('/check-auth', (req, res) => {
-  if (req.isAuthenticated()) {
-    res.json({ authenticated: true, user: req.user.username });
-  } else {
-    res.json({ authenticated: false });
+// Register
+app.post('/register', async (req, res) => {
+  const { username, email, password } = req.body;
+  if (!username || !/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+    return res.status(400).json({ error: 'Invalid username' });
+  }
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: 'Invalid email' });
+  }
+  if (!password || !/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d]{8,}$/.test(password)) {
+    return res.status(400).json({ error: 'Password must be 8+ characters with at least 1 letter and 1 number' });
+  }
+  try {
+    const existingUser = await User.findOne({ $or: [{ username }, { email }] });
+    if (existingUser) {
+      return res.status(400).json({ error: 'Username or email already exists' });
+    }
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = new User({ username, email, password: hashedPassword });
+    await user.save();
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'jwt-secret-key', { expiresIn: '24h' });
+    res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 });
+    res.json({ message: 'Registered and logged in', user: { username, email, chips: user.chips } });
+  } catch (err) {
+    console.error('Register error:', err);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Discord Auth
-app.get('/auth/discord', passport.authenticate('discord'));
-app.get('/auth/discord/callback', passport.authenticate('discord', {
-  failureRedirect: 'https://blackjack-frontend-lilac.vercel.app'
-}), (req, res) => {
-  console.log(`[${new Date().toISOString()}] Callback: User authenticated: ${req.user.username}`);
-  res.redirect('https://blackjack-frontend-lilac.vercel.app/?page=profil');
+// Login
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const user = await User.findOne({ email });
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'jwt-secret-key', { expiresIn: '24h' });
+    res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 });
+    res.json({ message: 'Logged in', user: { username: user.username, email, chips: user.chips } });
+  } catch (err) {
+    console.error('Login error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Check Authentication
+app.get('/check-auth', authenticateJWT, (req, res) => {
+  res.json({
+    authenticated: true,
+    user: {
+      username: req.user.username,
+      email: req.user.email,
+      discordConnected: !!req.user.discordId
+    }
+  });
+});
+
+// Connect Discord
+app.get('/auth/discord', authenticateJWT, passport.authenticate('discord'));
+app.get('/auth/discord/callback', authenticateJWT, passport.authenticate('discord', { failureRedirect: '/' }), async (req, res) => {
+  try {
+    const discordId = req.user.id; // From Discord profile
+    const existingUser = await User.findOne({ discordId });
+    if (existingUser && existingUser._id.toString() !== req.user._id.toString()) {
+      return res.status(400).json({ error: 'Discord account already linked to another user' });
+    }
+    req.user.discordId = discordId;
+    req.user.avatar = req.user.avatar || `https://cdn.discordapp.com/avatars/${discordId}/${req.user.avatar}.png`;
+    await req.user.save();
+    res.redirect('https://blackjack-frontend-lilac.vercel.app/?page=profil');
+  } catch (err) {
+    console.error('Discord connect error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 // User Info
-app.get('/profile', (req, res) => {
-  if (req.isAuthenticated()) {
-    res.json({
-      discordId: req.user.discordId,
-      username: req.user.username,
-      avatar: req.user.avatar,
-      chips: req.user.chips,
-      gamesPlayed: req.user.gamesPlayed,
-      wins: req.user.wins,
-      losses: req.user.losses,
-      totalBets: req.user.totalBets
-    });
-  } else {
-    res.status(401).json({ error: 'Not authenticated' });
-  }
+app.get('/profile', authenticateJWT, (req, res) => {
+  res.json({
+    username: req.user.username,
+    email: req.user.email,
+    avatar: req.user.avatar,
+    chips: req.user.chips,
+    gamesPlayed: req.user.gamesPlayed,
+    wins: req.user.wins,
+    losses: req.user.losses,
+    totalBets: req.user.totalBets,
+    discordConnected: !!req.user.discordId
+  });
 });
 
 // Leaderboard
@@ -156,17 +188,13 @@ app.get('/leaderboard', async (req, res) => {
 });
 
 // Balance
-app.get('/balance', (req, res) => {
-  if (req.isAuthenticated()) {
-    res.json({ chips: req.user.chips });
-  } else {
-    res.status(401).json({ error: 'Not authenticated' });
-  }
+app.get('/balance', authenticateJWT, (req, res) => {
+  res.json({ chips: req.user.chips });
 });
 
 // Blackjack Game
-app.post('/game/bet', async (req, res) => {
-  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Not authenticated' });
+app.post('/game/bet', authenticateJWT, async (req, res) => {
+  if (!req.user.discordId) return res.status(403).json({ error: 'Connect Discord to play' });
   const { bet } = req.body;
   if (!bet || bet <= 0 || bet > req.user.chips) {
     return res.status(400).json({ error: 'Invalid bet' });
@@ -184,8 +212,8 @@ app.post('/game/bet', async (req, res) => {
 });
 
 // Update game result
-app.post('/game/result', async (req, res) => {
-  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Not authenticated' });
+app.post('/game/result', authenticateJWT, async (req, res) => {
+  if (!req.user.discordId) return res.status(403).json({ error: 'Connect Discord to play' });
   const { won, chipsWon } = req.body;
   try {
     if (won) {
