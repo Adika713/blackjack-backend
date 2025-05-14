@@ -63,6 +63,7 @@ passport.use(new DiscordStrategy({
   try {
     return done(null, profile);
   } catch (err) {
+    console.error('Discord strategy error:', err);
     return done(err, null);
   }
 }));
@@ -74,7 +75,7 @@ passport.deserializeUser((user, done) => done(null, user));
 const authenticateJWT = async (req, res, next) => {
   const token = req.cookies.token;
   if (!token) {
-    console.log('No JWT token found in cookies');
+    console.log('No JWT token found in cookies for path:', req.path);
     return res.status(401).json({ error: 'Not authenticated' });
   }
   try {
@@ -91,7 +92,7 @@ const authenticateJWT = async (req, res, next) => {
     req.jwtUser = user;
     next();
   } catch (err) {
-    console.error('JWT verification error:', err.message);
+    console.error('JWT verification error for path:', req.path, 'Error:', err.message);
     res.status(401).json({ error: 'Invalid token' });
   }
 };
@@ -169,13 +170,21 @@ app.get('/check-auth', authenticateJWT, (req, res) => {
 
 // Connect Discord
 app.get('/auth/discord', authenticateJWT, (req, res, next) => {
-  console.log('Initiating Discord auth for user:', req.jwtUser.username);
-  req.session.jwtUserId = req.jwtUser._id;
-  passport.authenticate('discord')(req, res, next);
+  console.log('Initiating Discord auth for user:', req.jwtUser.username, 'Setting jwtUserId:', req.jwtUser._id);
+  req.session.jwtUserId = req.jwtUser._id.toString();
+  req.session.save(err => {
+    if (err) {
+      console.error('Session save error in /auth/discord:', err);
+      return res.status(500).json({ error: 'Session error' });
+    }
+    console.log('Session saved with jwtUserId:', req.session.jwtUserId);
+    passport.authenticate('discord')(req, res, next);
+  });
 });
 
 app.get('/auth/discord/callback', authenticateJWT, passport.authenticate('discord', { failureRedirect: '/' }), async (req, res) => {
   try {
+    console.log('Discord callback session:', req.session);
     const discordId = req.user.id; // From Discord profile
     const userId = req.session.jwtUserId;
     if (!userId) {
@@ -196,7 +205,12 @@ app.get('/auth/discord/callback', authenticateJWT, passport.authenticate('discor
     await user.save();
     console.log(`Discord connected for user: ${user.username}, discordId: ${discordId}`);
     delete req.session.jwtUserId;
-    res.redirect('https://blackjack-frontend-lilac.vercel.app/?page=profil');
+    req.session.save(err => {
+      if (err) {
+        console.error('Session save error in /auth/discord/callback:', err);
+      }
+      res.redirect('https://blackjack-frontend-lilac.vercel.app/?page=profil');
+    });
   } catch (err) {
     console.error('Discord connect error:', err);
     res.status(500).json({ error: 'Server error' });
