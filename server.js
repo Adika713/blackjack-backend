@@ -25,9 +25,9 @@ app.use(session({
     collectionName: 'sessions'
   }),
   cookie: {
-    secure: process.env.NODE_ENV === 'production',
+    secure: true, // Required for cross-origin cookies
     httpOnly: true,
-    sameSite: 'lax',
+    sameSite: 'none', // Allow cross-origin cookie sharing
     maxAge: 24 * 60 * 60 * 1000 // 24 hours
   }
 }));
@@ -36,9 +36,9 @@ app.use(passport.session());
 
 // Debug session middleware
 app.use((req, res, next) => {
-  console.log('Session ID:', req.sessionID);
-  console.log('User:', req.user);
-  console.log('Authenticated:', req.isAuthenticated());
+  console.log(`[${new Date().toISOString()}] Session ID: ${req.sessionID}`);
+  console.log(`[${new Date().toISOString()}] User: ${req.user ? req.user.username : 'None'}`);
+  console.log(`[${new Date().toISOString()}] Authenticated: ${req.isAuthenticated()}`);
   next();
 });
 
@@ -100,14 +100,23 @@ app.get('/', (req, res) => {
   res.send('Blackjack Backend Running');
 });
 
+// Check Authentication
+app.get('/check-auth', (req, res) => {
+  if (req.isAuthenticated()) {
+    res.json({ authenticated: true, user: req.user.username });
+  } else {
+    res.json({ authenticated: false });
+  }
+});
+
 // Discord Auth
 app.get('/auth/discord', passport.authenticate('discord'));
 app.get('/auth/discord/callback', passport.authenticate('discord', {
   failureRedirect: 'https://blackjack-frontend-lilac.vercel.app'
 }), (req, res) => {
-  console.log('Callback: User authenticated:', req.user);
-  res.redirect('https://blackjack-frontend-lilac.vercel.app');
-}));
+  console.log(`[${new Date().toISOString()}] Callback: User authenticated: ${req.user.username}`);
+  res.redirect('https://blackjack-frontend-lilac.vercel.app/profil');
+});
 
 // User Info
 app.get('/profile', (req, res) => {
