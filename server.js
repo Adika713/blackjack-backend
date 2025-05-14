@@ -27,17 +27,20 @@ app.use(cookieParser());
 
 // Log incoming cookies and headers for debugging
 app.use((req, res, next) => {
-  console.log('Request path:', req.path, 'Cookies:', req.cookies, 'Headers:', req.headers);
+  console.log('Request path:', req.path, 'Cookies:', req.cookies, 'Headers:', req.headers, 'Session ID:', req.sessionID);
   next();
 });
 
+// Session middleware
 app.use(session({
   secret: process.env.SESSION_SECRET || 'session-secret-key',
   resave: false,
   saveUninitialized: false,
   store: MongoStore.create({
     mongoUrl: process.env.MONGO_URI,
-    collectionName: 'sessions'
+    collectionName: 'sessions',
+    ttl: 24 * 60 * 60, // 1 day
+    autoRemove: 'native'
   }),
   cookie: { secure: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 }
 }));
@@ -88,7 +91,7 @@ passport.deserializeUser((user, done) => done(null, user));
 const authenticateJWT = async (req, res, next) => {
   const token = req.cookies.token;
   if (!token) {
-    console.log('No JWT token found in cookies for path:', req.path);
+    console.log('No JWT token found in cookies for path:', req.path, 'Session ID:', req.sessionID);
     return res.status(401).json({ error: 'Not authenticated' });
   }
   try {
@@ -99,13 +102,13 @@ const authenticateJWT = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user = await User.findById(decoded.userId);
     if (!user) {
-      console.log('User not found for ID:', decoded.userId);
+      console.log('User not found for ID:', decoded.userId, 'Session ID:', req.sessionID);
       return res.status(401).json({ error: 'User not found' });
     }
     req.jwtUser = user;
     next();
   } catch (err) {
-    console.error('JWT verification error for path:', req.path, 'Error:', err.message);
+    console.error('JWT verification error for path:', req.path, 'Error:', err.message, 'Session ID:', req.sessionID);
     return res.status(401).json({ error: 'Invalid token' });
   }
 };
@@ -202,7 +205,7 @@ app.get('/auth/discord', authenticateJWT, (req, res, next) => {
   });
 });
 
-app.get('/auth/discord/callback', authenticateJWT, passport.authenticate('discord', { failureRedirect: '/' }), async (req, res) => {
+app.get('/auth/discord/callback', passport.authenticate('discord', { failureRedirect: '/' }), async (req, res) => {
   try {
     console.log('Discord callback session:', req.session, 'Session ID:', req.sessionID);
     const discordId = req.user.id; // From Discord profile
