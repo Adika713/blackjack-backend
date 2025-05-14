@@ -1,0 +1,18 @@
+{
+  "name": "blackjack-backend",
+  "version": "1.0.0",
+  "description": "Backend for Blackjack game",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.17.1",
+    "mongoose": "^6.0.12",
+    "cors": "^2.8.5",
+    "passport": "^0.5.0",
+    "passport-discord": "^0.1.4",
+    "express-session": "^1.17.2",
+    "connect-mongo": "^4.6.0"
+  }
+}
