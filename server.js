@@ -7,6 +7,7 @@ const passport = require('passport');
 const DiscordStrategy = require('passport-discord').Strategy;
 const cookieParser = require('cookie-parser');
 const session = require('express-session');
+const rateLimit = require('express-rate-limit');
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -22,6 +23,13 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use(cookieParser());
+
+// Log incoming cookies and headers for debugging
+app.use((req, res, next) => {
+  console.log('Request path:', req.path, 'Cookies:', req.cookies, 'Headers:', req.headers);
+  next();
+});
+
 app.use(session({
   secret: process.env.SESSION_SECRET || 'session-secret-key',
   resave: false,
@@ -96,6 +104,13 @@ const authenticateJWT = async (req, res, next) => {
     res.status(401).json({ error: 'Invalid token' });
   }
 };
+
+// Rate limit for /balance to prevent excessive requests
+const balanceLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit to 100 requests per window
+  message: 'Too many requests to /balance, please try again later'
+});
 
 // Routes
 app.get('/', (req, res) => {
@@ -252,7 +267,7 @@ app.get('/leaderboard', async (req, res) => {
 });
 
 // Balance
-app.get('/balance', authenticateJWT, (req, res) => {
+app.get('/balance', balanceLimiter, authenticateJWT, (req, res) => {
   res.json({ chips: req.jwtUser.chips });
 });
 
