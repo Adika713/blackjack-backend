@@ -81,15 +81,22 @@ passport.use(new DiscordStrategy({
   state: true
 }, async (accessToken, refreshToken, profile, done) => {
   try {
+    console.log('Discord strategy processing for user:', profile.id);
     return done(null, profile);
   } catch (err) {
-    console.error('Discord strategy error:', err);
+    console.error('Discord strategy error:', err.message, err.stack);
     return done(err, null);
   }
 }));
 
-passport.serializeUser((user, done) => done(null, user));
-passport.deserializeUser((user, done) => done(null, user));
+passport.serializeUser((user, done) => {
+  console.log('Serializing user:', user.id);
+  done(null, user);
+});
+passport.deserializeUser((user, done) => {
+  console.log('Deserializing user:', user.id);
+  done(null, user);
+});
 
 // JWT Middleware
 const authenticateJWT = async (req, res, next) => {
@@ -126,6 +133,7 @@ const balanceLimiter = rateLimit({
 
 // Routes
 app.get('/', (req, res) => {
+  console.log('Root endpoint accessed, Session ID:', req.sessionID);
   res.send('Blackjack Backend Running');
 });
 
@@ -213,13 +221,13 @@ app.get('/auth/discord', authenticateJWT, (req, res, next) => {
 
 app.get('/auth/discord/callback', passport.authenticate('discord', { failureRedirect: '/' }), async (req, res) => {
   try {
-    console.log('Discord callback session:', req.session, 'Session ID:', req.sessionID);
+    console.log('Discord callback session:', req.session, 'Session ID:', req.sessionID, 'Query:', req.query);
     const receivedState = req.query.state;
     const storedState = req.session.state;
     const userId = req.session.jwtUserId;
     
     if (!receivedState || receivedState !== storedState) {
-      console.log('Invalid state parameter for Session ID:', req.sessionID);
+      console.log('Invalid state parameter:', { receivedState, storedState }, 'Session ID:', req.sessionID);
       return res.status(401).json({ error: 'Invalid state' });
     }
     
@@ -254,7 +262,7 @@ app.get('/auth/discord/callback', passport.authenticate('discord', { failureRedi
       res.redirect('https://blackjack-frontend-lilac.vercel.app/?page=profil');
     });
   } catch (err) {
-    console.error('Discord connect error:', err);
+    console.error('Discord callback error:', err.message, err.stack);
     res.status(500).json({ error: 'Server error' });
   }
 });
