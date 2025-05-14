@@ -1,7 +1,6 @@
 {
   "name": "blackjack-backend",
   "version": "1.0.0",
-  "description": "Backend for Blackjack game",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
