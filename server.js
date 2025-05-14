@@ -6,6 +6,7 @@ const jwt = require('jsonwebtoken');
 const passport = require('passport');
 const DiscordStrategy = require('passport-discord').Strategy;
 const cookieParser = require('cookie-parser');
+const session = require('express-session');
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -18,7 +19,14 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use(cookieParser());
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'session-secret-key',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { secure: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 }
+}));
 app.use(passport.initialize());
+app.use(passport.session());
 
 // MongoDB connection
 const mongoUri = process.env.MONGO_URI;
