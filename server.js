@@ -78,16 +78,20 @@ const authenticateJWT = async (req, res, next) => {
     return res.status(401).json({ error: 'Not authenticated' });
   }
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'jwt-secret-key');
+    if (!process.env.JWT_SECRET) {
+      console.error('JWT_SECRET environment variable is not set');
+      return res.status(500).json({ error: 'Server configuration error' });
+    }
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user = await User.findById(decoded.userId);
     if (!user) {
       console.log('User not found for ID:', decoded.userId);
       return res.status(401).json({ error: 'User not found' });
     }
-    req.jwtUser = user; // Store JWT user separately to avoid Passport conflict
+    req.jwtUser = user;
     next();
   } catch (err) {
-    console.error('JWT verification error:', err);
+    console.error('JWT verification error:', err.message);
     res.status(401).json({ error: 'Invalid token' });
   }
 };
@@ -117,7 +121,11 @@ app.post('/register', async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({ username, email, password: hashedPassword });
     await user.save();
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'jwt-secret-key', { expiresIn: '24h' });
+    if (!process.env.JWT_SECRET) {
+      console.error('JWT_SECRET environment variable is not set');
+      return res.status(500).json({ error: 'Server configuration error' });
+    }
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '24h' });
     res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 });
     res.json({ message: 'Registered and logged in', user: { username, email, chips: user.chips } });
   } catch (err) {
@@ -134,7 +142,11 @@ app.post('/login', async (req, res) => {
     if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'jwt-secret-key', { expiresIn: '24h' });
+    if (!process.env.JWT_SECRET) {
+      console.error('JWT_SECRET environment variable is not set');
+      return res.status(500).json({ error: 'Server configuration error' });
+    }
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '24h' });
     res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 });
     res.json({ message: 'Logged in', user: { username: user.username, email, chips: user.chips } });
   } catch (err) {
@@ -157,14 +169,15 @@ app.get('/check-auth', authenticateJWT, (req, res) => {
 
 // Connect Discord
 app.get('/auth/discord', authenticateJWT, (req, res, next) => {
-  req.session.jwtUserId = req.jwtUser._id; // Store user ID in session
+  console.log('Initiating Discord auth for user:', req.jwtUser.username);
+  req.session.jwtUserId = req.jwtUser._id;
   passport.authenticate('discord')(req, res, next);
 });
 
 app.get('/auth/discord/callback', authenticateJWT, passport.authenticate('discord', { failureRedirect: '/' }), async (req, res) => {
   try {
     const discordId = req.user.id; // From Discord profile
-    const userId = req.session.jwtUserId; // Retrieve user ID from session
+    const userId = req.session.jwtUserId;
     if (!userId) {
       console.log('No jwtUserId found in session');
       return res.status(401).json({ error: 'User session lost' });
@@ -182,7 +195,7 @@ app.get('/auth/discord/callback', authenticateJWT, passport.authenticate('discor
     user.avatar = user.avatar || `https://cdn.discordapp.com/avatars/${discordId}/${req.user.avatar}.png`;
     await user.save();
     console.log(`Discord connected for user: ${user.username}, discordId: ${discordId}`);
-    delete req.session.jwtUserId; // Clean up session
+    delete req.session.jwtUserId;
     res.redirect('https://blackjack-frontend-lilac.vercel.app/?page=profil');
   } catch (err) {
     console.error('Discord connect error:', err);
