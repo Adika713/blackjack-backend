@@ -5,6 +5,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const passport = require('passport');
 const DiscordStrategy = require('passport-discord').Strategy;
+const cookieParser = require('cookie-parser');
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -16,6 +17,8 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
+app.use(cookieParser());
+app.use(passport.initialize());
 
 // MongoDB connection
 const mongoUri = process.env.MONGO_URI;
@@ -55,7 +58,6 @@ passport.use(new DiscordStrategy({
 
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((user, done) => done(null, user));
-app.use(passport.initialize());
 
 // JWT Middleware
 const authenticateJWT = async (req, res, next) => {
