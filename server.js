@@ -71,12 +71,16 @@ passport.deserializeUser(async (id, done) => {
 });
 
 // Routes
+app.get('/', (req, res) => {
+  res.send('Blackjack Backend Running');
+});
+
 // Discord Auth
 app.get('/auth/discord', passport.authenticate('discord'));
 app.get('/auth/discord/callback', passport.authenticate('discord', {
-  failureRedirect: 'https://blackjack-frontend-lilac.vercel.app/'
+  failureRedirect: 'https://blackjack-frontend.vercel.app' // Replace with your Vercel URL
 }), (req, res) => {
-  res.redirect('https://blackjack-frontend-lilac.vercel.app/'); // Redirect to frontend
+  res.redirect('https://blackjack-frontend.vercel.app'); // Replace with your Vercel URL
 });
 
 // User Info
