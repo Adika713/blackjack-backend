@@ -39,10 +39,15 @@ if (!mongoUri) {
 
 async function connectToMongoDB(attempt = 1, maxAttempts = 5) {
   try {
-    await mongoose.connect(mongoUri, { useNewUrlParser: true, useUnifiedTopology: true });
-    console.log('Connected to MongoDB');
-    // Create indexes
+    await mongoose.connect(mongoUri, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true
+    });
+    console.log('Connected to MongoDB, Database:', mongoose.connection.db.databaseName);
+    // Drop and recreate indexes
+    await User.collection.dropIndexes().catch(err => console.warn('No indexes to drop:', err.message));
     await User.createIndexes();
+    console.log('User indexes created');
   } catch (err) {
     console.error(`MongoDB connection attempt ${attempt} failed:`, err.message, err.stack);
     if (attempt < maxAttempts) {
@@ -71,10 +76,17 @@ const userSchema = new mongoose.Schema({
   totalBets: { type: Number, default: 0 }
 });
 
-// Explicitly define indexes
-userSchema.index({ username: 1 }, { unique: true });
-userSchema.index({ email: 1 }, { unique: true });
+// Explicitly define indexes with case-insensitive collation
+userSchema.index({ username: 1 }, { unique: true, collation: { locale: 'en', strength: 2 } });
+userSchema.index({ email: 1 }, { unique: true, collation: { locale: 'en', strength: 2 } });
 userSchema.index({ discordId: 1 }, { unique: true, sparse: true });
+
+// Normalize username and email to lowercase before saving
+userSchema.pre('save', function(next) {
+  if (this.username) this.username = this.username.toLowerCase();
+  if (this.email) this.email = this.email.toLowerCase();
+  next();
+});
 
 const User = mongoose.model('User', userSchema);
 
@@ -144,8 +156,9 @@ app.get('/', (req, res) => {
 
 // Register
 app.post('/register', async (req, res) => {
-  const { username, email, password } = req.body;
+  let { username, email, password } = req.body;
   console.log('Register attempt:', { username, email });
+
   try {
     // Validate inputs
     if (!username || !/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
@@ -161,6 +174,11 @@ app.post('/register', async (req, res) => {
       return res.status(400).json({ error: 'Password must be 8+ characters with at least 1 letter and 1 number' });
     }
 
+    // Normalize inputs
+    username = username.toLowerCase();
+    email = email.toLowerCase();
+    console.log('Normalized inputs:', { username, email });
+
     // Check MongoDB connection
     if (mongoose.connection.readyState !== 1) {
       console.error('MongoDB not connected');
@@ -173,11 +191,17 @@ app.post('/register', async (req, res) => {
       return res.status(500).json({ error: 'Server configuration error' });
     }
 
-    // Check for existing user
-    const existingUser = await User.findOne({ $or: [{ username }, { email }] });
-    if (existingUser) {
-      console.log('Username or email already exists:', { username, email });
-      return res.status(400).json({ error: 'Username or email already exists' });
+    // Check for existing user (case-insensitive)
+    const usernameExists = await User.findOne({ username }).collation({ locale: 'en', strength: 2 });
+    if (usernameExists) {
+      console.log('Username already exists:', username, 'Found:', usernameExists);
+      return res.status(400).json({ error: 'Username already exists' });
+    }
+
+    const emailExists = await User.findOne({ email }).collation({ locale: 'en', strength: 2 });
+    if (emailExists) {
+      console.log('Email already exists:', email, 'Found:', emailExists);
+      return res.status(400).json({ error: 'Email already exists' });
     }
 
     // Hash password
@@ -210,10 +234,14 @@ app.post('/register', async (req, res) => {
       message: err.message,
       stack: err.stack,
       code: err.code,
-      name: err.name
+      name: err.name,
+      keyPattern: err.keyPattern,
+      keyValue: err.keyValue
     });
     if (err.name === 'MongoServerError' && err.code === 11000) {
-      return res.status(400).json({ error: 'Username or email already exists' });
+      const field = err.keyPattern ? Object.keys(err.keyPattern)[0] : 'unknown';
+      console.log('Duplicate key error:', { field, value: err.keyValue });
+      return res.status(400).json({ error: `${field.charAt(0).toUpperCase() + field.slice(1)} already exists` });
     }
     if (err.name === 'ValidationError') {
       return res.status(400).json({ error: `Invalid user data: ${err.message}` });
@@ -224,10 +252,12 @@ app.post('/register', async (req, res) => {
 
 // Login
 app.post('/login', async (req, res) => {
-  const { email, password } = req.body;
+  let { email, password } = req.body;
   console.log('Login attempt:', { email });
   try {
-    const user = await User.findOne({ email });
+    // Normalize email
+    email = email.toLowerCase();
+    const user = await User.findOne({ email }).collation({ locale: 'en', strength: 2 });
     if (!user || !(await bcrypt.compare(password, user.password))) {
       console.log('Invalid email or password:', { email });
       return res.status(401).json({ error: 'Invalid email or password' });
