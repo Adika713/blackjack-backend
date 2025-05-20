@@ -6,12 +6,24 @@ const jwt = require('jsonwebtoken');
 const passport = require('passport');
 const DiscordStrategy = require('passport-discord').Strategy;
 const cookieParser = require('cookie-parser');
-const session = require('express-session');
-const MongoStore = require('connect-mongo');
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
+const winston = require('winston');
 const app = express();
 const port = process.env.PORT || 3000;
+
+// Configure Winston logger
+const logger = winston.createLogger({
+  level: 'debug',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
+  transports: [
+    new winston.transports.File({ filename: 'discord-jwt-callback.log' }),
+    new winston.transports.Console()
+  ]
+});
 
 // Set Mongoose strictQuery to suppress deprecation warning
 mongoose.set('strictQuery', true);
@@ -28,33 +40,19 @@ app.use(cookieParser());
 
 // Log incoming cookies and headers for debugging
 app.use((req, res, next) => {
-  console.log('Request path:', req.path, 'Cookies:', req.cookies, 'Headers:', req.headers, 'Session ID:', req.sessionID);
+  logger.debug('Request received', {
+    path: req.path,
+    cookies: req.cookies,
+    headers: req.headers
+  });
   next();
 });
-
-// Session middleware
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'session-secret-key',
-  resave: false,
-  saveUninitialized: false,
-  store: MongoStore.create({
-    mongoUrl: process.env.MONGO_URI,
-    collectionName: 'sessions',
-    ttl: 24 * 60 * 60,
-    autoRemove: 'native'
-  }, err => {
-    if (err) console.error('MongoStore initialization error:', err);
-  }),
-  cookie: { secure: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 }
-}));
-app.use(passport.initialize());
-app.use(passport.session());
 
 // MongoDB connection
 const mongoUri = process.env.MONGO_URI;
 mongoose.connect(mongoUri, { useNewUrlParser: true, useUnifiedTopology: true })
-  .then(() => console.log('Connected to MongoDB'))
-  .catch(err => console.error('MongoDB connection error:', err));
+  .then(() => logger.info('Connected to MongoDB'))
+  .catch(err => logger.error('MongoDB connection error', { error: err.message }));
 
 // User Schema
 const userSchema = new mongoose.Schema({
@@ -77,49 +75,42 @@ passport.use(new DiscordStrategy({
   clientID: process.env.DISCORD_CLIENT_ID,
   clientSecret: process.env.DISCORD_CLIENT_SECRET,
   callbackURL: 'https://blackjack-backend-aew7.onrender.com/auth/discord/callback',
-  scope: ['identify'],
-  state: true
+  scope: ['identify']
 }, async (accessToken, refreshToken, profile, done) => {
   try {
-    console.log('Discord strategy processing for user:', profile.id, 'Access Token:', accessToken);
+    logger.info('Discord strategy processing', { discordId: profile.id, accessToken });
     return done(null, profile);
   } catch (err) {
-    console.error('Discord strategy error:', err.message, err.stack);
+    logger.error('Discord strategy error', { error: err.message, stack: err.stack });
     return done(err, null);
   }
 }));
 
-passport.serializeUser((user, done) => {
-  console.log('Serializing user:', user.id);
-  done(null, user);
-});
-passport.deserializeUser((user, done) => {
-  console.log('Deserializing user:', user.id);
-  done(null, user);
-});
+// Initialize Passport without session
+app.use(passport.initialize());
 
 // JWT Middleware
 const authenticateJWT = async (req, res, next) => {
   const token = req.cookies.token;
   if (!token) {
-    console.log('No JWT token found in cookies for path:', req.path, 'Session ID:', req.sessionID);
+    logger.warn('No JWT token found in cookies', { path: req.path });
     return res.status(401).json({ error: 'Not authenticated' });
   }
   try {
     if (!process.env.JWT_SECRET) {
-      console.error('JWT_SECRET environment variable is not set');
+      logger.error('JWT_SECRET environment variable is not set');
       return res.status(500).json({ error: 'Server configuration error' });
     }
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user = await User.findById(decoded.userId);
     if (!user) {
-      console.log('User not found for ID:', decoded.userId, 'Session ID:', req.sessionID);
+      logger.warn('User not found for ID', { userId: decoded.userId });
       return res.status(401).json({ error: 'User not found' });
     }
     req.jwtUser = user;
     next();
   } catch (err) {
-    console.error('JWT verification error for path:', req.path, 'Error:', err.message, 'Session ID:', req.sessionID);
+    logger.error('JWT verification error', { path: req.path, error: err.message });
     return res.status(401).json({ error: 'Invalid token' });
   }
 };
@@ -133,7 +124,7 @@ const balanceLimiter = rateLimit({
 
 // Routes
 app.get('/', (req, res) => {
-  console.log('Root endpoint accessed, Session ID:', req.sessionID);
+  logger.info('Root endpoint accessed');
   res.send('Blackjack Backend Running');
 });
 
@@ -158,14 +149,14 @@ app.post('/register', async (req, res) => {
     const user = new User({ username, email, password: hashedPassword });
     await user.save();
     if (!process.env.JWT_SECRET) {
-      console.error('JWT_SECRET environment variable is not set');
+      logger.error('JWT_SECRET environment variable is not set');
       return res.status(500).json({ error: 'Server configuration error' });
     }
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '24h' });
     res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 });
     res.json({ message: 'Registered and logged in', user: { username, email, chips: user.chips } });
   } catch (err) {
-    console.error('Register error:', err);
+    logger.error('Register error', { error: err.message });
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -179,14 +170,14 @@ app.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
     if (!process.env.JWT_SECRET) {
-      console.error('JWT_SECRET environment variable is not set');
+      logger.error('JWT_SECRET environment variable is not set');
       return res.status(500).json({ error: 'Server configuration error' });
     }
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '24h' });
     res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 });
     res.json({ message: 'Logged in', user: { username: user.username, email, chips: user.chips } });
   } catch (err) {
-    console.error('Login error:', err);
+    logger.error('Login error', { error: err.message });
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -205,82 +196,83 @@ app.get('/check-auth', authenticateJWT, (req, res) => {
 
 // Connect Discord
 app.get('/auth/discord', authenticateJWT, (req, res, next) => {
-  console.log('Initiating Discord auth for user:', req.jwtUser.username, 'Setting jwtUserId:', req.jwtUser._id, 'Session ID:', req.sessionID);
   const state = crypto.randomBytes(16).toString('hex');
-  req.session.jwtUserId = req.jwtUser._id.toString();
-  req.session.state = state;
-  req.session.save(err => {
-    if (err) {
-      console.error('Session save error in /auth/discord:', err);
-      return res.status(500).json({ error: 'Session error' });
-    }
-    console.log('Session saved with jwtUserId:', req.session.jwtUserId, 'State:', state, 'Session ID:', req.sessionID);
-    passport.authenticate('discord', { state })(req, res, next);
-  });
+  const tempPayload = {
+    userId: req.jwtUser._id.toString(),
+    state
+  };
+  const tempToken = jwt.sign(tempPayload, process.env.JWT_SECRET, { expiresIn: '10m' });
+  logger.info('Initiating Discord auth', { username: req.jwtUser.username, userId: req.jwtUser._id, state });
+  passport.authenticate('discord', {
+    state: tempToken, // Pass temp JWT as state
+    session: false
+  })(req, res, next);
 });
 
+// Discord Callback
 app.get('/auth/discord/callback', (req, res, next) => {
-  passport.authenticate('discord', { failureRedirect: '/' }, (err, user, info) => {
+  logger.debug('Discord callback received', { query: req.query });
+  passport.authenticate('discord', { session: false }, async (err, profile, info) => {
     if (err) {
-      console.error('Passport authentication error:', err.message, err.stack);
-      return res.status(500).json({ error: 'Authentication error' });
+      logger.error('Passport authentication error', { error: err.message, stack: err.stack });
+      return res.redirect('https://blackjack-frontend-lilac.vercel.app/?error=auth_error');
     }
-    if (!user) {
-      console.log('Passport authentication failed:', info, 'Query:', req.query, 'Session ID:', req.sessionID);
-      return res.redirect('/');
+    if (!profile) {
+      logger.warn('Passport authentication failed', { info, query: req.query });
+      return res.redirect('https://blackjack-frontend-lilac.vercel.app/?error=no_profile');
     }
-    req.logIn(user, async (loginErr) => {
-      if (loginErr) {
-        console.error('Passport login error:', loginErr.message, loginErr.stack);
-        return res.status(500).json({ error: 'Login error' });
+    try {
+      const tempToken = req.query.state;
+      if (!tempToken) {
+        logger.warn('No state parameter in callback', { query: req.query });
+        return res.redirect('https://blackjack-frontend-lilac.vercel.app/?error=invalid_state');
       }
+      let tempPayload;
       try {
-        console.log('Discord callback session:', req.session, 'Session ID:', req.sessionID, 'Query:', req.query, 'User:', user.id);
-        const receivedState = req.query.state;
-        const storedState = req.session.state;
-        const userId = req.session.jwtUserId;
-        
-        // Temporarily bypass state validation for debugging
-        // if (!receivedState || receivedState !== storedState) {
-        //   console.log('Invalid state parameter:', { receivedState, storedState }, 'Session ID:', req.sessionID);
-        //   return res.status(401).json({ error: 'Invalid state' });
-        // }
-        
-        if (!userId) {
-          console.log('No jwtUserId found in session for Session ID:', req.sessionID);
-          return res.status(401).json({ error: 'User session lost' });
-        }
-        
-        const discordId = user.id; // From Discord profile
-        const dbUser = await User.findById(userId);
-        if (!dbUser) {
-          console.log('User not found for ID:', userId);
-          return res.status(401).json({ error: 'User not found' });
-        }
-        
-        const existingUser = await User.findOne({ discordId });
-        if (existingUser && existingUser._id.toString() !== dbUser._id.toString()) {
-          return res.status(400).json({ error: 'Discord account already linked to another user' });
-        }
-        
-        dbUser.discordId = discordId;
-        dbUser.avatar = dbUser.avatar || `https://cdn.discordapp.com/avatars/${discordId}/${user.avatar}.png`;
-        await dbUser.save();
-        console.log(`Discord connected for user: ${dbUser.username}, discordId: ${discordId}`);
-        
-        delete req.session.jwtUserId;
-        delete req.session.state;
-        req.session.save(err => {
-          if (err) {
-            console.error('Session save error in /auth/discord/callback:', err);
-          }
-          res.redirect('https://blackjack-frontend-lilac.vercel.app/?page=profil');
-        });
-      } catch (err) {
-        console.error('Discord callback error:', err.message, err.stack);
-        res.status(500).json({ error: 'Server error' });
+        tempPayload = jwt.verify(tempToken, process.env.JWT_SECRET);
+      } catch (jwtErr) {
+        logger.error('Invalid state JWT', { error: jwtErr.message });
+        return res.redirect('https://blackjack-frontend-lilac.vercel.app/?error=invalid_state');
       }
-    });
+
+      const userId = tempPayload.userId;
+      const dbUser = await User.findById(userId);
+      if (!dbUser) {
+        logger.warn('User not found for ID', { userId });
+        return res.redirect('https://blackjack-frontend-lilac.vercel.app/?error=user_not_found');
+      }
+
+      const discordId = profile.id;
+      const existingUser = await User.findOne({ discordId });
+      if (existingUser && existingUser._id.toString() !== dbUser._id.toString()) {
+        logger.warn('Discord account already linked', { discordId, userId: dbUser._id });
+        return res.redirect('https://blackjack-frontend-lilac.vercel.app/?error=discord_linked');
+      }
+
+      dbUser.discordId = discordId;
+      dbUser.avatar = dbUser.avatar || `https://cdn.discordapp.com/avatars/${discordId}/${profile.avatar}.png`;
+      await dbUser.save();
+      logger.info('Discord connected', { username: dbUser.username, discordId });
+
+      // Generate new JWT with updated user data
+      const newToken = jwt.sign(
+        { userId: dbUser._id, discordId: dbUser.discordId },
+        process.env.JWT_SECRET,
+        { expiresIn: '24h' }
+      );
+      logger.info('New JWT generated', { userId: dbUser._id, discordId });
+
+      res.cookie('token', newToken, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'none',
+        maxAge: 24 * 60 * 60 * 1000
+      });
+      res.redirect('https://blackjack-frontend-lilac.vercel.app/?page=profil');
+    } catch (err) {
+      logger.error('Discord callback error', { error: err.message, stack: err.stack });
+      res.redirect('https://blackjack-frontend-lilac.vercel.app/?error=server_error');
+    }
   })(req, res, next);
 });
 
@@ -313,7 +305,7 @@ app.get('/leaderboard', async (req, res) => {
     const total = await User.countDocuments();
     res.json({ users, total, page, pages: Math.ceil(total / limit) });
   } catch (err) {
-    console.error('Error fetching leaderboard:', err);
+    logger.error('Error fetching leaderboard', { error: err.message });
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -337,7 +329,7 @@ app.post('/game/bet', authenticateJWT, async (req, res) => {
     await req.jwtUser.save();
     res.json({ chips: req.jwtUser.chips, bet });
   } catch (err) {
-    console.error('Error placing bet:', err);
+    logger.error('Error placing bet', { error: err.message });
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -356,12 +348,18 @@ app.post('/game/result', authenticateJWT, async (req, res) => {
     await req.jwtUser.save();
     res.json({ chips: req.jwtUser.chips });
   } catch (err) {
-    console.error('Error updating game result:', err);
+    logger.error('Error updating game result', { error: err.message });
     res.status(500).json({ error: 'Server error' });
   }
 });
 
+// Error handling middleware
+app.use((err, req, res, next) => {
+  logger.error('Server error', { path: req.path, error: err.message, stack: err.stack });
+  res.status(500).json({ error: 'Internal server error' });
+});
+
 // Start server
 app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+  logger.info(`Server running on port ${port}`);
 });
