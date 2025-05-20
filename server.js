@@ -14,8 +14,19 @@ const app = express();
 app.use(express.json());
 app.use(cookieParser());
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'https://blackjack-frontend-d6umc6k0h-adika713s-projects.vercel.app',
-  credentials: true
+  origin: function (origin, callback) {
+    const allowedOrigin = process.env.FRONTEND_URL || 'blackjack-frontend-3678yrmgc-adika713s-projects.vercel.app';
+    const normalizedOrigin = origin ? origin.replace(/\/$/, '') : origin; // Remove trailing slash
+    const normalizedAllowed = allowedOrigin.replace(/\/$/, ''); // Remove trailing slash from allowed origin
+    if (!origin || normalizedOrigin === normalizedAllowed) {
+      callback(null, allowedOrigin);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 // MongoDB connection
@@ -75,7 +86,7 @@ app.post('/register', async (req, res) => {
     const token = jwt.sign({ userId: user._id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '1h' });
     res.cookie('token', token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      secure: true,
       sameSite: 'strict',
       maxAge: 3600000
     });
@@ -132,6 +143,7 @@ app.get('/check-auth', authenticateToken, async (req, res) => {
   }
 });
 
+console.log('Registering /balance route');
 app.get('/balance', authenticateToken, async (req, res) => {
   console.log('Balance requested for user:', req.user.username);
   try {
