@@ -71,10 +71,22 @@ async function connectToMongoDB(attempt = 1, maxAttempts = 10) {
     await mongoose.connect(mongoUri, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
-      serverSelectionTimeoutMS: 10000 // Increased timeout
+      serverSelectionTimeoutMS: 10000
     });
     console.log('Connected to MongoDB, Database:', mongoose.connection.db.databaseName);
-    await User.collection.dropIndexes().catch(err => console.warn('No indexes to drop:', err.message));
+
+    // Drop conflicting indexes
+    const indexes = await User.collection.getIndexes();
+    if (indexes.username_1 && !indexes.username_1.collation) {
+      console.log('Dropping conflicting username_1 index...');
+      await User.collection.dropIndex('username_1');
+    }
+    if (indexes.email_1 && !indexes.email_1.collation) {
+      console.log('Dropping conflicting email_1 index...');
+      await User.collection.dropIndex('email_1');
+    }
+
+    // Create new indexes
     await User.createIndexes();
     console.log('User indexes created');
   } catch (err) {
@@ -85,8 +97,8 @@ async function connectToMongoDB(attempt = 1, maxAttempts = 10) {
       await new Promise(resolve => setTimeout(resolve, delay));
       return connectToMongoDB(attempt + 1, maxAttempts);
     }
-    console.error('Max MongoDB connection attempts reached. Exiting.');
-    process.exit(1);
+    console.error('Max MongoDB connection attempts reached. Server will continue with limited functionality.');
+    // Continue without exiting to avoid crashing
   }
 }
 
@@ -227,9 +239,7 @@ app.post('/register', async (req, res) => {
       return res.status(400).json({ error: 'Email already exists' });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10).catch(err => {
-      throw new Error(`Password hashing failed: ${err.message}`);
-    });
+    const hashedPassword = await bcrypt.hash(password, 10);
     console.log('Creating user:', username);
 
     const user = new User({ username, email, password: hashedPassword });
@@ -242,7 +252,8 @@ app.post('/register', async (req, res) => {
       httpOnly: true,
       secure: true,
       sameSite: 'none',
-      maxAge: 24 * 60 * 60 * 1000
+      maxAge: 24 * 60 * 60 * 1000,
+      path: '/'
     });
     res.json({
       message: 'Registered and logged in',
@@ -282,7 +293,13 @@ app.post('/login', async (req, res) => {
     }
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '24h' });
     console.log('User logged in, setting token for:', user.username);
-    res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 });
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none',
+      maxAge: 24 * 60 * 60 * 1000,
+      path: '/'
+    });
     res.json({ message: 'Logged in', user: { username: user.username, email, chips: user.chips } });
   } catch (err) {
     console.error('Login error:', err.message, err.stack);
@@ -451,7 +468,7 @@ app.use((err, req, res, next) => {
 // Keep-alive to prevent spin-down
 setInterval(() => {
   console.log('Keep-alive ping:', new Date().toISOString());
-}, 5 * 60 * 1000); // Every 5 minutes
+}, 5 * 60 * 1000);
 
 // Start server
 app.listen(port, () => {
