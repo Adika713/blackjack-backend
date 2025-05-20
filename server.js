@@ -14,15 +14,13 @@ const port = process.env.PORT || 3000;
 // Set Mongoose strictQuery to suppress deprecation warning
 mongoose.set('strictQuery', true);
 
-// Middleware
+// CORS Middleware
 app.use(cors({
-  origin: ['https://blackjack-frontend-lilac.vercel.app', '*'], // Temporary wildcard for debugging
+  origin: 'https://blackjack-frontend-lilac.vercel.app',
   credentials: true,
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
 }));
-app.use(express.json());
-app.use(cookieParser());
 
 // Log incoming requests
 app.use((req, res, next) => {
@@ -34,8 +32,14 @@ app.use((req, res, next) => {
     body: req.body,
     ip: req.ip
   });
+  res.setHeader('Access-Control-Allow-Origin', 'https://blackjack-frontend-lilac.vercel.app');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   next();
 });
+
+// Other Middleware
+app.use(express.json());
+app.use(cookieParser());
 
 // MongoDB connection with retry
 const mongoUri = process.env.MONGO_URI;
@@ -422,6 +426,18 @@ app.post('/game/result', authenticateJWT, async (req, res) => {
     console.error('Game result error:', err.message, err.stack);
     res.status(500).json({ error: 'Server error' });
   }
+});
+
+// Global Error Handler
+app.use((err, req, res, next) => {
+  console.error('Server error:', {
+    message: err.message,
+    stack: err.stack,
+    path: req.path
+  });
+  res.setHeader('Access-Control-Allow-Origin', 'https://blackjack-frontend-lilac.vercel.app');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.status(500).json({ error: 'Server error' });
 });
 
 // Start server
