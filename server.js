@@ -143,9 +143,13 @@ passport.deserializeUser((user, done) => {
 });
 
 const authenticateJWT = async (req, res, next) => {
-  const token = req.cookies.token;
+  let token = req.cookies.token;
+  if (!token && req.headers.authorization) {
+    token = req.headers.authorization.replace('Bearer ', '');
+    console.log('Using Authorization header token for path:', req.path);
+  }
   if (!token) {
-    console.log('No JWT token found for path:', req.path, 'Cookies:', req.cookies);
+    console.log('No JWT token found for path:', req.path, 'Cookies:', req.cookies, 'Headers:', req.headers);
     return res.status(401).json({ error: 'Not authenticated' });
   }
   try {
@@ -231,14 +235,15 @@ app.post('/register', async (req, res) => {
     res.cookie('token', token, {
       httpOnly: true,
       secure: true,
-      sameSite: 'none',
+      sameSite: 'lax', // Relaxed for testing
       maxAge: 24 * 60 * 60 * 1000,
       path: '/'
     });
     console.log('Set-Cookie header sent for:', username, 'Token:', token.slice(0, 10) + '...');
     res.json({
       message: 'Registered and logged in',
-      user: { username, email, chips: user.chips }
+      user: { username, email, chips: user.chips },
+      token // Return token for frontend storage
     });
   } catch (err) {
     console.error('Register error:', {
@@ -276,12 +281,16 @@ app.post('/login', async (req, res) => {
     res.cookie('token', token, {
       httpOnly: true,
       secure: true,
-      sameSite: 'none',
+      sameSite: 'lax', // Relaxed for testing
       maxAge: 24 * 60 * 60 * 1000,
       path: '/'
     });
     console.log('Set-Cookie header sent for:', user.username, 'Token:', token.slice(0, 10) + '...');
-    res.json({ message: 'Logged in', user: { username: user.username, email, chips: user.chips } });
+    res.json({
+      message: 'Logged in',
+      user: { username: user.username, email, chips: user.chips },
+      token // Return token for frontend storage
+    });
   } catch (err) {
     console.error('Login error:', err.message, err.stack);
     res.status(500).json({ error: 'Server error' });
@@ -303,7 +312,7 @@ app.get('/check-auth', authenticateJWT, (req, res) => {
 app.get('/auth/discord', authenticateJWT, (req, res, next) => {
   console.log('Initiating Discord auth for user:', req.jwtUser.username);
   const state = crypto.randomBytes(16).toString('hex');
-  const token = req.cookies.token;
+  const token = req.cookies.token || req.headers.authorization?.replace('Bearer ', '');
   console.log('Discord auth, state:', state, 'User ID:', req.jwtUser._id);
   passport.authenticate('discord', {
     state: `${state}|${token}`
@@ -435,7 +444,7 @@ app.use((err, req, res, next) => {
   });
   res.setHeader('Access-Control-Allow-Origin', 'https://blackjack-frontend-lilac.vercel.app');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.status(500).json({ error: 'Server error' });
+  res.status(500).json({ token: 'Server error' });
 });
 
 setInterval(() => {
