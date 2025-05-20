@@ -11,13 +11,10 @@ const crypto = require('crypto');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Log server startup
 console.log('Starting Blackjack backend server...');
 
-// Set Mongoose strictQuery
 mongoose.set('strictQuery', true);
 
-// CORS Middleware
 app.use(cors({
   origin: 'https://blackjack-frontend-lilac.vercel.app',
   credentials: true,
@@ -25,7 +22,6 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
 }));
 
-// Explicit OPTIONS route for CORS preflight
 app.options('*', cors(), (req, res) => {
   console.log('Handling OPTIONS request:', req.path);
   res.setHeader('Access-Control-Allow-Origin', 'https://blackjack-frontend-lilac.vercel.app');
@@ -35,7 +31,6 @@ app.options('*', cors(), (req, res) => {
   res.status(204).send();
 });
 
-// Log incoming requests
 app.use((req, res, next) => {
   console.log('Request:', {
     path: req.path,
@@ -51,11 +46,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// Other Middleware
 app.use(express.json());
 app.use(cookieParser());
 
-// Validate environment variables
 const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET', 'DISCORD_CLIENT_ID', 'DISCORD_CLIENT_SECRET'];
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
 if (missingEnvVars.length > 0) {
@@ -63,7 +56,6 @@ if (missingEnvVars.length > 0) {
   process.exit(1);
 }
 
-// MongoDB connection with retry
 const mongoUri = process.env.MONGO_URI;
 async function connectToMongoDB(attempt = 1, maxAttempts = 10) {
   try {
@@ -75,7 +67,6 @@ async function connectToMongoDB(attempt = 1, maxAttempts = 10) {
     });
     console.log('Connected to MongoDB, Database:', mongoose.connection.db.databaseName);
 
-    // Drop conflicting indexes
     const indexes = await User.collection.getIndexes();
     if (indexes.username_1 && !indexes.username_1.collation) {
       console.log('Dropping conflicting username_1 index...');
@@ -86,7 +77,6 @@ async function connectToMongoDB(attempt = 1, maxAttempts = 10) {
       await User.collection.dropIndex('email_1');
     }
 
-    // Create new indexes
     await User.createIndexes();
     console.log('User indexes created');
   } catch (err) {
@@ -98,13 +88,11 @@ async function connectToMongoDB(attempt = 1, maxAttempts = 10) {
       return connectToMongoDB(attempt + 1, maxAttempts);
     }
     console.error('Max MongoDB connection attempts reached. Server will continue with limited functionality.');
-    // Continue without exiting to avoid crashing
   }
 }
 
 connectToMongoDB();
 
-// User Schema
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true, match: /^[a-zA-Z0-9_]{3,20}$/ },
   email: { type: String, required: true, unique: true, match: /^[^\s@]+@[^\s@]+\.[^\s@]+$/ },
@@ -118,12 +106,10 @@ const userSchema = new mongoose.Schema({
   totalBets: { type: Number, default: 0 }
 });
 
-// Indexes with case-insensitive collation
 userSchema.index({ username: 1 }, { unique: true, collation: { locale: 'en', strength: 2 } });
 userSchema.index({ email: 1 }, { unique: true, collation: { locale: 'en', strength: 2 } });
 userSchema.index({ discordId: 1 }, { unique: true, sparse: true });
 
-// Normalize username and email
 userSchema.pre('save', function(next) {
   if (this.username) this.username = this.username.toLowerCase();
   if (this.email) this.email = this.email.toLowerCase();
@@ -132,7 +118,6 @@ userSchema.pre('save', function(next) {
 
 const User = mongoose.model('User', userSchema);
 
-// Passport Discord Strategy
 passport.use(new DiscordStrategy({
   clientID: process.env.DISCORD_CLIENT_ID,
   clientSecret: process.env.DISCORD_CLIENT_SECRET,
@@ -157,11 +142,10 @@ passport.deserializeUser((user, done) => {
   done(null, user);
 });
 
-// JWT Middleware
 const authenticateJWT = async (req, res, next) => {
   const token = req.cookies.token;
   if (!token) {
-    console.log('No JWT token found for path:', req.path);
+    console.log('No JWT token found for path:', req.path, 'Cookies:', req.cookies);
     return res.status(401).json({ error: 'Not authenticated' });
   }
   try {
@@ -179,27 +163,23 @@ const authenticateJWT = async (req, res, next) => {
   }
 };
 
-// Rate limit for /balance
 const balanceLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
   message: 'Too many requests to /balance'
 });
 
-// Health Check
 app.get('/health', (req, res) => {
   const status = mongoose.connection.readyState === 1 ? 'ok' : 'db-error';
   console.log('Health check:', { status, db: mongoose.connection.readyState });
   res.json({ status, dbConnected: mongoose.connection.readyState === 1 });
 });
 
-// Routes
 app.get('/', (req, res) => {
   console.log('Root endpoint accessed');
   res.send('Blackjack Backend Running');
 });
 
-// Register
 app.post('/register', async (req, res) => {
   let { username, email, password } = req.body;
   console.log('Register attempt:', { username, email, headers: req.headers });
@@ -255,6 +235,7 @@ app.post('/register', async (req, res) => {
       maxAge: 24 * 60 * 60 * 1000,
       path: '/'
     });
+    console.log('Set-Cookie header sent for:', username, 'Token:', token.slice(0, 10) + '...');
     res.json({
       message: 'Registered and logged in',
       user: { username, email, chips: user.chips }
@@ -280,7 +261,6 @@ app.post('/register', async (req, res) => {
   }
 });
 
-// Login
 app.post('/login', async (req, res) => {
   let { email, password } = req.body;
   console.log('Login attempt:', { email });
@@ -300,6 +280,7 @@ app.post('/login', async (req, res) => {
       maxAge: 24 * 60 * 60 * 1000,
       path: '/'
     });
+    console.log('Set-Cookie header sent for:', user.username, 'Token:', token.slice(0, 10) + '...');
     res.json({ message: 'Logged in', user: { username: user.username, email, chips: user.chips } });
   } catch (err) {
     console.error('Login error:', err.message, err.stack);
@@ -307,7 +288,6 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// Check Authentication
 app.get('/check-auth', authenticateJWT, (req, res) => {
   console.log('Check-auth for user:', req.jwtUser.username);
   res.json({
@@ -320,7 +300,6 @@ app.get('/check-auth', authenticateJWT, (req, res) => {
   });
 });
 
-// Connect Discord
 app.get('/auth/discord', authenticateJWT, (req, res, next) => {
   console.log('Initiating Discord auth for user:', req.jwtUser.username);
   const state = crypto.randomBytes(16).toString('hex');
@@ -373,7 +352,6 @@ app.get('/auth/discord/callback', (req, res, next) => {
   })(req, res, next);
 });
 
-// User Info
 app.get('/profile', authenticateJWT, (req, res) => {
   console.log('Profile accessed for user:', req.jwtUser.username);
   res.json({
@@ -389,7 +367,6 @@ app.get('/profile', authenticateJWT, (req, res) => {
   });
 });
 
-// Leaderboard
 app.get('/leaderboard', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -408,13 +385,11 @@ app.get('/leaderboard', async (req, res) => {
   }
 });
 
-// Balance
 app.get('/balance', balanceLimiter, authenticateJWT, (req, res) => {
   console.log('Balance accessed for user:', req.jwtUser.username);
   res.json({ chips: req.jwtUser.chips });
 });
 
-// Blackjack Game
 app.post('/game/bet', authenticateJWT, async (req, res) => {
   if (!req.jwtUser.discordId) return res.status(403).json({ error: 'Connect Discord to play' });
   const { bet } = req.body;
@@ -433,7 +408,6 @@ app.post('/game/bet', authenticateJWT, async (req, res) => {
   }
 });
 
-// Update game result
 app.post('/game/result', authenticateJWT, async (req, res) => {
   if (!req.jwtUser.discordId) return res.status(403).json({ error: 'Connect Discord to play' });
   const { won, chipsWon } = req.body;
@@ -452,7 +426,6 @@ app.post('/game/result', authenticateJWT, async (req, res) => {
   }
 });
 
-// Global Error Handler
 app.use((err, req, res, next) => {
   console.error('Server error:', {
     message: err.message,
@@ -465,12 +438,10 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Server error' });
 });
 
-// Keep-alive to prevent spin-down
 setInterval(() => {
   console.log('Keep-alive ping:', new Date().toISOString());
 }, 5 * 60 * 1000);
 
-// Start server
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
