@@ -11,7 +11,10 @@ const crypto = require('crypto');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Set Mongoose strictQuery to suppress deprecation warning
+// Log server startup
+console.log('Starting Blackjack backend server...');
+
+// Set Mongoose strictQuery
 mongoose.set('strictQuery', true);
 
 // CORS Middleware
@@ -22,6 +25,16 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
 }));
 
+// Explicit OPTIONS route for CORS preflight
+app.options('*', cors(), (req, res) => {
+  console.log('Handling OPTIONS request:', req.path);
+  res.setHeader('Access-Control-Allow-Origin', 'https://blackjack-frontend-lilac.vercel.app');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cookie');
+  res.status(204).send();
+});
+
 // Log incoming requests
 app.use((req, res, next) => {
   console.log('Request:', {
@@ -30,7 +43,8 @@ app.use((req, res, next) => {
     headers: req.headers,
     cookies: req.cookies,
     body: req.body,
-    ip: req.ip
+    ip: req.ip,
+    timestamp: new Date().toISOString()
   });
   res.setHeader('Access-Control-Allow-Origin', 'https://blackjack-frontend-lilac.vercel.app');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -41,18 +55,23 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use(cookieParser());
 
-// MongoDB connection with retry
-const mongoUri = process.env.MONGO_URI;
-if (!mongoUri) {
-  console.error('MONGO_URI environment variable is not set');
+// Validate environment variables
+const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET', 'DISCORD_CLIENT_ID', 'DISCORD_CLIENT_SECRET'];
+const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
+if (missingEnvVars.length > 0) {
+  console.error('Missing environment variables:', missingEnvVars.join(', '));
   process.exit(1);
 }
 
-async function connectToMongoDB(attempt = 1, maxAttempts = 5) {
+// MongoDB connection with retry
+const mongoUri = process.env.MONGO_URI;
+async function connectToMongoDB(attempt = 1, maxAttempts = 10) {
   try {
+    console.log(`Attempting MongoDB connection (Attempt ${attempt}/${maxAttempts})...`);
     await mongoose.connect(mongoUri, {
       useNewUrlParser: true,
-      useUnifiedTopology: true
+      useUnifiedTopology: true,
+      serverSelectionTimeoutMS: 10000 // Increased timeout
     });
     console.log('Connected to MongoDB, Database:', mongoose.connection.db.databaseName);
     await User.collection.dropIndexes().catch(err => console.warn('No indexes to drop:', err.message));
@@ -61,8 +80,9 @@ async function connectToMongoDB(attempt = 1, maxAttempts = 5) {
   } catch (err) {
     console.error(`MongoDB connection attempt ${attempt} failed:`, err.message, err.stack);
     if (attempt < maxAttempts) {
-      console.log(`Retrying MongoDB connection in ${attempt * 3} seconds...`);
-      await new Promise(resolve => setTimeout(resolve, attempt * 3000));
+      const delay = attempt * 5000;
+      console.log(`Retrying MongoDB connection in ${delay/1000} seconds...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
       return connectToMongoDB(attempt + 1, maxAttempts);
     }
     console.error('Max MongoDB connection attempts reached. Exiting.');
@@ -133,10 +153,6 @@ const authenticateJWT = async (req, res, next) => {
     return res.status(401).json({ error: 'Not authenticated' });
   }
   try {
-    if (!process.env.JWT_SECRET) {
-      console.error('JWT_SECRET not set');
-      return res.status(500).json({ error: 'Server configuration error' });
-    }
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user = await User.findById(decoded.userId);
     if (!user) {
@@ -197,11 +213,6 @@ app.post('/register', async (req, res) => {
     if (mongoose.connection.readyState !== 1) {
       console.error('MongoDB not connected');
       return res.status(500).json({ error: 'Database connection error' });
-    }
-
-    if (!process.env.JWT_SECRET) {
-      console.error('JWT_SECRET not set');
-      return res.status(500).json({ error: 'Server configuration error' });
     }
 
     const usernameExists = await User.findOne({ username }).collation({ locale: 'en', strength: 2 });
@@ -268,10 +279,6 @@ app.post('/login', async (req, res) => {
     if (!user || !(await bcrypt.compare(password, user.password))) {
       console.log('Invalid email or password:', { email });
       return res.status(401).json({ error: 'Invalid email or password' });
-    }
-    if (!process.env.JWT_SECRET) {
-      console.error('JWT_SECRET not set');
-      return res.status(500).json({ error: 'Server configuration error' });
     }
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '24h' });
     console.log('User logged in, setting token for:', user.username);
@@ -433,12 +440,18 @@ app.use((err, req, res, next) => {
   console.error('Server error:', {
     message: err.message,
     stack: err.stack,
-    path: req.path
+    path: req.path,
+    timestamp: new Date().toISOString()
   });
   res.setHeader('Access-Control-Allow-Origin', 'https://blackjack-frontend-lilac.vercel.app');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.status(500).json({ error: 'Server error' });
 });
+
+// Keep-alive to prevent spin-down
+setInterval(() => {
+  console.log('Keep-alive ping:', new Date().toISOString());
+}, 5 * 60 * 1000); // Every 5 minutes
 
 // Start server
 app.listen(port, () => {
