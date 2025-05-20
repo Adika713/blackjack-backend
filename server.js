@@ -71,16 +71,16 @@ const User = mongoose.model('User', userSchema);
 // Middleware to verify JWT
 const authenticateToken = (req, res, next) => {
   const token = req.cookies.token;
-  console.log('Authenticate token:', token ? token.slice(0, 10) + '...' : 'none', 'Cookies:', req.cookies);
-  if (!token) return res.status(401).json({ error: 'User not found' });
-
+  console.log('Authenticate Token - Cookie Present:', !!token);
+  console.log('Authenticate Token - Token:', token ? token.slice(0, 10) + '...' : 'none');
+  if (!token) return res.status(401).json({ error: 'No token provided' });
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    console.log('Authenticate Token - Decoded:', decoded);
     req.user = decoded;
-    console.log('Token verified, user:', decoded.username);
     next();
   } catch (err) {
-    console.error('Token verification error:', err);
+    console.error('Authenticate Token - Error:', err.message);
     res.status(401).json({ error: 'Invalid token' });
   }
 };
@@ -105,12 +105,12 @@ app.post('/register', async (req, res) => {
     await user.save();
 
     const token = jwt.sign({ userId: user._id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.cookie('token', token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'strict',
-      maxAge: 3600000
-    });
+res.cookie('token', token, {
+  httpOnly: true,
+  secure: true, // Force secure for HTTPS
+  sameSite: 'none', // Allow cross-site requests
+  maxAge: 3600000
+});
 
     console.log('Set-Cookie header sent for:', user.username, 'Token:', token.slice(0, 10) + '...');
     res.json({ message: 'Registered and logged in', user: { username: user.username, email: user.email }, token });
@@ -160,6 +160,25 @@ app.get('/check-auth', authenticateToken, async (req, res) => {
     res.json({ authenticated: true, user: { username: user.username, email: user.email } });
   } catch (err) {
     console.error('Check-auth error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/profile', authenticateToken, async (req, res) => {
+  console.log('Profile requested for user:', req.user.username);
+  try {
+    const user = await User.findById(req.user.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({
+      username: user.username,
+      email: user.email,
+      chips: user.chips,
+      gamesPlayed: user.gamesPlayed
+    });
+  } catch (err) {
+    console.error('Profile error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
