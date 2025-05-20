@@ -15,19 +15,34 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(cors({
   origin: function (origin, callback) {
-    const allowedOrigin = process.env.FRONTEND_URL || 'blackjack-frontend-pcnermf4h-adika713s-projects.vercel.app';
-    const normalizedOrigin = origin ? origin.replace(/\/$/, '') : origin; // Remove trailing slash
-    const normalizedAllowed = allowedOrigin.replace(/\/$/, ''); // Remove trailing slash from allowed origin
+    console.log('Environment Variables - FRONTEND_URL:', process.env.FRONTEND_URL);
+
+    // List of allowed origins
+    const allowedOrigins = [
+      process.env.FRONTEND_URL || 'https://blackjack-frontend-d6umc6k0h-adika713s-projects.vercel.app',
+      'https://blackjack-frontend-lilac.vercel.app',
+      'https://blackjack-frontend-pcnermf4h-adika713s-projects.vercel.app'
+      // Add other custom domains here, e.g., 'https://blackjack.example.com'
+    ];
+
+    if (!origin) {
+      console.log('CORS Check - No origin provided, allowing request');
+      return callback(null, allowedOrigins[0]);
+    }
+
+    const requestOrigin = origin.replace(/\/$/, '').toLowerCase();
+    const isAllowed = allowedOrigins.some(allowed => allowed.replace(/\/$/, '').toLowerCase() === requestOrigin);
+
     console.log('CORS Check - Request Origin:', origin);
-    console.log('CORS Check - Allowed Origin:', allowedOrigin);
-    console.log('CORS Check - Normalized Origin:', normalizedOrigin);
-    console.log('CORS Check - Normalized Allowed:', normalizedAllowed);
-    if (!origin || normalizedOrigin === normalizedAllowed) {
+    console.log('CORS Check - Allowed Origins:', allowedOrigins);
+    console.log('CORS Check - Normalized Request Origin:', requestOrigin);
+
+    if (isAllowed) {
       console.log('CORS Check - Origin allowed');
-      callback(null, allowedOrigin);
+      callback(null, origin); // Echo back the request origin
     } else {
       console.log('CORS Check - Origin not allowed');
-      callback(new Error('Not allowed by CORS'));
+      callback(new Error(`CORS Error: Origin ${origin} not allowed. Expected one of ${allowedOrigins.join(', ')}`));
     }
   },
   credentials: true,
