@@ -15,34 +15,14 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(cors({
   origin: function (origin, callback) {
-    console.log('Environment Variables - FRONTEND_URL:', process.env.FRONTEND_URL);
-
-    // List of allowed origins
-    const allowedOrigins = [
-      process.env.FRONTEND_URL || 'https://blackjack-frontend-d6umc6k0h-adika713s-projects.vercel.app',
-      'https://blackjack-frontend-lilac.vercel.app',
-      'https://blackjack-frontend-pcnermf4h-adika713s-projects.vercel.app'
-      // Add other custom domains here, e.g., 'https://blackjack.example.com'
-    ];
-
-    if (!origin) {
-      console.log('CORS Check - No origin provided, allowing request');
-      return callback(null, allowedOrigins[0]);
-    }
-
+    const allowedOrigin = process.env.FRONTEND_URL || 'https://blackjack-frontend-d6umc6k0h-adika713s-projects.vercel.app';
+    if (!origin) return callback(null, allowedOrigin);
     const requestOrigin = origin.replace(/\/$/, '').toLowerCase();
-    const isAllowed = allowedOrigins.some(allowed => allowed.replace(/\/$/, '').toLowerCase() === requestOrigin);
-
-    console.log('CORS Check - Request Origin:', origin);
-    console.log('CORS Check - Allowed Origins:', allowedOrigins);
-    console.log('CORS Check - Normalized Request Origin:', requestOrigin);
-
-    if (isAllowed) {
-      console.log('CORS Check - Origin allowed');
-      callback(null, origin); // Echo back the request origin
+    const allowed = allowedOrigin.replace(/\/$/, '').toLowerCase();
+    if (requestOrigin === allowed) {
+      callback(null, allowedOrigin);
     } else {
-      console.log('CORS Check - Origin not allowed');
-      callback(new Error(`CORS Error: Origin ${origin} not allowed. Expected one of ${allowedOrigins.join(', ')}`));
+      callback(new Error(`CORS Error: Origin ${origin} not allowed. Expected ${allowedOrigin}`));
     }
   },
   credentials: true,
@@ -105,12 +85,12 @@ app.post('/register', async (req, res) => {
     const user = new User({ username, email, password: hashedPassword });
     await user.save();
 
-    const token = jwt.sign({ userId: user._id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '1h' });
+const token = jwt.sign({ userId: user._id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '24h' });
 res.cookie('token', token, {
   httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: 'strict',
-  maxAge: 3600000
+  secure: true,
+  sameSite: 'none',
+  maxAge: 24 * 60 * 60 * 1000 // 24 hours in milliseconds
 });
 
     console.log('Set-Cookie header sent for:', user.username, 'Token:', token.slice(0, 10) + '...');
@@ -122,29 +102,26 @@ res.cookie('token', token, {
 });
 
 app.post('/login', async (req, res) => {
-  console.log('Login request:', { email: req.body.email });
+  console.log('Login request:', req.body);
   const { email, password } = req.body;
   try {
     const user = await User.findOne({ email });
     if (!user) {
-      return res.status(400).json({ error: 'Invalid email or password' });
+      return res.status(400).json({ error: 'Invalid credentials' });
     }
-
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(400).json({ error: 'Invalid email or password' });
+      return res.status(400).json({ error: 'Invalid credentials' });
     }
-
     const token = jwt.sign({ userId: user._id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '1h' });
     res.cookie('token', token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: true,
+      sameSite: 'none',
       maxAge: 3600000
     });
-
-    console.log('Set-Cookie header sent for:', user.username, 'Token:', token.slice(0, 10) + '...');
-    res.json({ message: 'Logged in', user: { username: user.username, email: user.email }, token });
+    console.log('Login - Cookie Set: token=', token.slice(0, 10) + '...');
+    res.json({ message: 'Logged in', user: { username: user.username, email: user.email } });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Server error' });
