@@ -77,7 +77,8 @@ const authenticateToken = (req, res, next) => {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     console.log('Authenticate Token - Decoded:', decoded);
-    req.user = decoded;
+    req.user = decoded; // Ensure req.user is set
+    console.log('Authenticate Token - req.user set:', req.user);
     next();
   } catch (err) {
     console.error('Authenticate Token - Error:', err.message);
@@ -107,8 +108,8 @@ app.post('/register', async (req, res) => {
     const token = jwt.sign({ userId: user._id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '1h' });
 res.cookie('token', token, {
   httpOnly: true,
-  secure: true, // Force secure for HTTPS
-  sameSite: 'none', // Allow cross-site requests
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'strict',
   maxAge: 3600000
 });
 
