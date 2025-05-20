@@ -15,12 +15,18 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(cors({
   origin: function (origin, callback) {
-    const allowedOrigin = process.env.FRONTEND_URL || 'blackjack-frontend-3678yrmgc-adika713s-projects.vercel.app';
+    const allowedOrigin = process.env.FRONTEND_URL || 'blackjack-frontend-pcnermf4h-adika713s-projects.vercel.app';
     const normalizedOrigin = origin ? origin.replace(/\/$/, '') : origin; // Remove trailing slash
     const normalizedAllowed = allowedOrigin.replace(/\/$/, ''); // Remove trailing slash from allowed origin
+    console.log('CORS Check - Request Origin:', origin);
+    console.log('CORS Check - Allowed Origin:', allowedOrigin);
+    console.log('CORS Check - Normalized Origin:', normalizedOrigin);
+    console.log('CORS Check - Normalized Allowed:', normalizedAllowed);
     if (!origin || normalizedOrigin === normalizedAllowed) {
+      console.log('CORS Check - Origin allowed');
       callback(null, allowedOrigin);
     } else {
+      console.log('CORS Check - Origin not allowed');
       callback(new Error('Not allowed by CORS'));
     }
   },
