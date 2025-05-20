@@ -8,22 +8,8 @@ const DiscordStrategy = require('passport-discord').Strategy;
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
-const winston = require('winston');
 const app = express();
 const port = process.env.PORT || 3000;
-
-// Configure Winston logger
-const logger = winston.createLogger({
-  level: 'debug',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json()
-  ),
-  transports: [
-    new winston.transports.File({ filename: 'discord-jwt-callback.log' }),
-    new winston.transports.Console()
-  ]
-});
 
 // Set Mongoose strictQuery to suppress deprecation warning
 mongoose.set('strictQuery', true);
@@ -40,19 +26,36 @@ app.use(cookieParser());
 
 // Log incoming cookies and headers for debugging
 app.use((req, res, next) => {
-  logger.debug('Request received', {
-    path: req.path,
-    cookies: req.cookies,
-    headers: req.headers
-  });
+  console.log('Request path:', req.path, 'Cookies:', req.cookies, 'Headers:', req.headers);
   next();
 });
 
-// MongoDB connection
+// MongoDB connection with retry
 const mongoUri = process.env.MONGO_URI;
-mongoose.connect(mongoUri, { useNewUrlParser: true, useUnifiedTopology: true })
-  .then(() => logger.info('Connected to MongoDB'))
-  .catch(err => logger.error('MongoDB connection error', { error: err.message }));
+if (!mongoUri) {
+  console.error('MONGO_URI environment variable is not set');
+  process.exit(1);
+}
+
+async function connectToMongoDB(attempt = 1, maxAttempts = 5) {
+  try {
+    await mongoose.connect(mongoUri, { useNewUrlParser: true, useUnifiedTopology: true });
+    console.log('Connected to MongoDB');
+    // Create indexes
+    await User.createIndexes();
+  } catch (err) {
+    console.error(`MongoDB connection attempt ${attempt} failed:`, err.message, err.stack);
+    if (attempt < maxAttempts) {
+      console.log(`Retrying MongoDB connection in ${attempt * 2} seconds...`);
+      await new Promise(resolve => setTimeout(resolve, attempt * 2000));
+      return connectToMongoDB(attempt + 1, maxAttempts);
+    }
+    console.error('Max MongoDB connection attempts reached. Exiting.');
+    process.exit(1);
+  }
+}
+
+connectToMongoDB();
 
 // User Schema
 const userSchema = new mongoose.Schema({
@@ -68,6 +71,11 @@ const userSchema = new mongoose.Schema({
   totalBets: { type: Number, default: 0 }
 });
 
+// Explicitly define indexes
+userSchema.index({ username: 1 }, { unique: true });
+userSchema.index({ email: 1 }, { unique: true });
+userSchema.index({ discordId: 1 }, { unique: true, sparse: true });
+
 const User = mongoose.model('User', userSchema);
 
 // Passport Discord Strategy
@@ -78,39 +86,45 @@ passport.use(new DiscordStrategy({
   scope: ['identify']
 }, async (accessToken, refreshToken, profile, done) => {
   try {
-    logger.info('Discord strategy processing', { discordId: profile.id, accessToken });
+    console.log('Discord strategy processing for user:', profile.id, 'Access Token:', accessToken);
     return done(null, profile);
   } catch (err) {
-    logger.error('Discord strategy error', { error: err.message, stack: err.stack });
+    console.error('Discord strategy error:', err.message, err.stack);
     return done(err, null);
   }
 }));
 
-// Initialize Passport without session
-app.use(passport.initialize());
+passport.serializeUser((user, done) => {
+  console.log('Serializing user:', user.id);
+  done(null, user);
+});
+passport.deserializeUser((user, done) => {
+  console.log('Deserializing user:', user.id);
+  done(null, user);
+});
 
 // JWT Middleware
 const authenticateJWT = async (req, res, next) => {
   const token = req.cookies.token;
   if (!token) {
-    logger.warn('No JWT token found in cookies', { path: req.path });
+    console.log('No JWT token found in cookies for path:', req.path);
     return res.status(401).json({ error: 'Not authenticated' });
   }
   try {
     if (!process.env.JWT_SECRET) {
-      logger.error('JWT_SECRET environment variable is not set');
+      console.error('JWT_SECRET environment variable is not set');
       return res.status(500).json({ error: 'Server configuration error' });
     }
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user = await User.findById(decoded.userId);
     if (!user) {
-      logger.warn('User not found for ID', { userId: decoded.userId });
+      console.log('User not found for ID:', decoded.userId);
       return res.status(401).json({ error: 'User not found' });
     }
     req.jwtUser = user;
     next();
   } catch (err) {
-    logger.error('JWT verification error', { path: req.path, error: err.message });
+    console.error('JWT verification error for path:', req.path, 'Error:', err.message);
     return res.status(401).json({ error: 'Invalid token' });
   }
 };
@@ -124,39 +138,86 @@ const balanceLimiter = rateLimit({
 
 // Routes
 app.get('/', (req, res) => {
-  logger.info('Root endpoint accessed');
+  console.log('Root endpoint accessed');
   res.send('Blackjack Backend Running');
 });
 
 // Register
 app.post('/register', async (req, res) => {
   const { username, email, password } = req.body;
-  if (!username || !/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
-    return res.status(400).json({ error: 'Invalid username' });
-  }
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: 'Invalid email' });
-  }
-  if (!password || !/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d]{8,}$/.test(password)) {
-    return res.status(400).json({ error: 'Password must be 8+ characters with at least 1 letter and 1 number' });
-  }
+  console.log('Register attempt:', { username, email });
   try {
-    const existingUser = await User.findOne({ $or: [{ username }, { email }] });
-    if (existingUser) {
-      return res.status(400).json({ error: 'Username or email already exists' });
+    // Validate inputs
+    if (!username || !/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+      console.log('Invalid username:', username);
+      return res.status(400).json({ error: 'Username must be 3-20 characters, alphanumeric' });
     }
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const user = new User({ username, email, password: hashedPassword });
-    await user.save();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      console.log('Invalid email:', email);
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+    if (!password || !/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d]{8,}$/.test(password)) {
+      console.log('Invalid password');
+      return res.status(400).json({ error: 'Password must be 8+ characters with at least 1 letter and 1 number' });
+    }
+
+    // Check MongoDB connection
+    if (mongoose.connection.readyState !== 1) {
+      console.error('MongoDB not connected');
+      return res.status(500).json({ error: 'Database connection error' });
+    }
+
+    // Check JWT_SECRET
     if (!process.env.JWT_SECRET) {
-      logger.error('JWT_SECRET environment variable is not set');
+      console.error('JWT_SECRET environment variable is not set');
       return res.status(500).json({ error: 'Server configuration error' });
     }
+
+    // Check for existing user
+    const existingUser = await User.findOne({ $or: [{ username }, { email }] });
+    if (existingUser) {
+      console.log('Username or email already exists:', { username, email });
+      return res.status(400).json({ error: 'Username or email already exists' });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10).catch(err => {
+      throw new Error(`Password hashing failed: ${err.message}`);
+    });
+    console.log('Creating user:', username);
+
+    // Create and save user
+    const user = new User({ username, email, password: hashedPassword });
+    await user.save();
+
+    // Generate JWT
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '24h' });
-    res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 });
-    res.json({ message: 'Registered and logged in', user: { username, email, chips: user.chips } });
+    console.log('User registered, setting token for:', username);
+
+    // Set cookie and respond
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none',
+      maxAge: 24 * 60 * 60 * 1000
+    });
+    res.json({
+      message: 'Registered and logged in',
+      user: { username, email, chips: user.chips }
+    });
   } catch (err) {
-    logger.error('Register error', { error: err.message });
+    console.error('Register error:', {
+      message: err.message,
+      stack: err.stack,
+      code: err.code,
+      name: err.name
+    });
+    if (err.name === 'MongoServerError' && err.code === 11000) {
+      return res.status(400).json({ error: 'Username or email already exists' });
+    }
+    if (err.name === 'ValidationError') {
+      return res.status(400).json({ error: `Invalid user data: ${err.message}` });
+    }
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -164,26 +225,30 @@ app.post('/register', async (req, res) => {
 // Login
 app.post('/login', async (req, res) => {
   const { email, password } = req.body;
+  console.log('Login attempt:', { email });
   try {
     const user = await User.findOne({ email });
     if (!user || !(await bcrypt.compare(password, user.password))) {
+      console.log('Invalid email or password:', { email });
       return res.status(401).json({ error: 'Invalid email or password' });
     }
     if (!process.env.JWT_SECRET) {
-      logger.error('JWT_SECRET environment variable is not set');
+      console.error('JWT_SECRET environment variable is not set');
       return res.status(500).json({ error: 'Server configuration error' });
     }
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '24h' });
+    console.log('User logged in, setting token for:', user.username);
     res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 });
     res.json({ message: 'Logged in', user: { username: user.username, email, chips: user.chips } });
   } catch (err) {
-    logger.error('Login error', { error: err.message });
+    console.error('Login error:', err.message, err.stack);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
 // Check Authentication
 app.get('/check-auth', authenticateJWT, (req, res) => {
+  console.log('Check-auth for user:', req.jwtUser.username);
   res.json({
     authenticated: true,
     user: {
@@ -196,88 +261,61 @@ app.get('/check-auth', authenticateJWT, (req, res) => {
 
 // Connect Discord
 app.get('/auth/discord', authenticateJWT, (req, res, next) => {
+  console.log('Initiating Discord auth for user:', req.jwtUser.username);
   const state = crypto.randomBytes(16).toString('hex');
-  const tempPayload = {
-    userId: req.jwtUser._id.toString(),
-    state
-  };
-  const tempToken = jwt.sign(tempPayload, process.env.JWT_SECRET, { expiresIn: '10m' });
-  logger.info('Initiating Discord auth', { username: req.jwtUser.username, userId: req.jwtUser._id, state });
+  const token = req.cookies.token; // Pass JWT via query to callback
+  console.log('Discord auth, state:', state, 'User ID:', req.jwtUser._id);
   passport.authenticate('discord', {
-    state: tempToken, // Pass temp JWT as state
-    session: false
+    state: `${state}|${token}`
   })(req, res, next);
 });
 
-// Discord Callback
 app.get('/auth/discord/callback', (req, res, next) => {
-  logger.debug('Discord callback received', { query: req.query });
-  passport.authenticate('discord', { session: false }, async (err, profile, info) => {
+  console.log('Callback received, Query:', req.query, 'Cookies:', req.cookies);
+  passport.authenticate('discord', { failureRedirect: '/' }, async (err, user, info) => {
     if (err) {
-      logger.error('Passport authentication error', { error: err.message, stack: err.stack });
-      return res.redirect('https://blackjack-frontend-lilac.vercel.app/?error=auth_error');
+      console.error('Passport authentication error:', err.message, err.stack);
+      return res.status(500).json({ error: 'Authentication error' });
     }
-    if (!profile) {
-      logger.warn('Passport authentication failed', { info, query: req.query });
-      return res.redirect('https://blackjack-frontend-lilac.vercel.app/?error=no_profile');
+    if (!user) {
+      console.log('Passport authentication failed:', info, 'Query:', req.query);
+      return res.redirect('/');
     }
     try {
-      const tempToken = req.query.state;
-      if (!tempToken) {
-        logger.warn('No state parameter in callback', { query: req.query });
-        return res.redirect('https://blackjack-frontend-lilac.vercel.app/?error=invalid_state');
+      console.log('Discord callback, User:', user.id);
+      const state = req.query.state || '';
+      const [receivedState, token] = state.split('|');
+      if (!receivedState || !token) {
+        console.log('Invalid state or token in callback');
+        return res.status(401).json({ error: 'Invalid state or token' });
       }
-      let tempPayload;
-      try {
-        tempPayload = jwt.verify(tempToken, process.env.JWT_SECRET);
-      } catch (jwtErr) {
-        logger.error('Invalid state JWT', { error: jwtErr.message });
-        return res.redirect('https://blackjack-frontend-lilac.vercel.app/?error=invalid_state');
-      }
-
-      const userId = tempPayload.userId;
-      const dbUser = await User.findById(userId);
+      // Verify JWT
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const dbUser = await User.findById(decoded.userId);
       if (!dbUser) {
-        logger.warn('User not found for ID', { userId });
-        return res.redirect('https://blackjack-frontend-lilac.vercel.app/?error=user_not_found');
+        console.log('User not found for ID:', decoded.userId);
+        return res.status(401).json({ error: 'User not found' });
       }
-
-      const discordId = profile.id;
+      const discordId = user.id;
       const existingUser = await User.findOne({ discordId });
       if (existingUser && existingUser._id.toString() !== dbUser._id.toString()) {
-        logger.warn('Discord account already linked', { discordId, userId: dbUser._id });
-        return res.redirect('https://blackjack-frontend-lilac.vercel.app/?error=discord_linked');
+        return res.status(400).json({ error: 'Discord account already linked to another user' });
       }
-
       dbUser.discordId = discordId;
-      dbUser.avatar = dbUser.avatar || `https://cdn.discordapp.com/avatars/${discordId}/${profile.avatar}.png`;
+      dbUser.avatar = dbUser.avatar || `https://cdn.discordapp.com/avatars/${discordId}/${user.avatar}.png`;
       await dbUser.save();
-      logger.info('Discord connected', { username: dbUser.username, discordId });
-
-      // Generate new JWT with updated user data
-      const newToken = jwt.sign(
-        { userId: dbUser._id, discordId: dbUser.discordId },
-        process.env.JWT_SECRET,
-        { expiresIn: '24h' }
-      );
-      logger.info('New JWT generated', { userId: dbUser._id, discordId });
-
-      res.cookie('token', newToken, {
-        httpOnly: true,
-        secure: true,
-        sameSite: 'none',
-        maxAge: 24 * 60 * 60 * 1000
-      });
+      console.log(`Discord connected for user: ${dbUser.username}, discordId: ${discordId}`);
       res.redirect('https://blackjack-frontend-lilac.vercel.app/?page=profil');
     } catch (err) {
-      logger.error('Discord callback error', { error: err.message, stack: err.stack });
-      res.redirect('https://blackjack-frontend-lilac.vercel.app/?error=server_error');
+      console.error('Discord callback error:', err.message, err.stack);
+      res.status(500).json({ error: 'Server error' });
     }
   })(req, res, next);
 });
 
 // User Info
 app.get('/profile', authenticateJWT, (req, res) => {
+  console.log('Profile accessed for user:', req.jwtUser.username);
   res.json({
     username: req.jwtUser.username,
     email: req.jwtUser.email,
@@ -305,13 +343,14 @@ app.get('/leaderboard', async (req, res) => {
     const total = await User.countDocuments();
     res.json({ users, total, page, pages: Math.ceil(total / limit) });
   } catch (err) {
-    logger.error('Error fetching leaderboard', { error: err.message });
+    console.error('Leaderboard error:', err.message, err.stack);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
 // Balance
 app.get('/balance', balanceLimiter, authenticateJWT, (req, res) => {
+  console.log('Balance accessed for user:', req.jwtUser.username);
   res.json({ chips: req.jwtUser.chips });
 });
 
@@ -329,7 +368,7 @@ app.post('/game/bet', authenticateJWT, async (req, res) => {
     await req.jwtUser.save();
     res.json({ chips: req.jwtUser.chips, bet });
   } catch (err) {
-    logger.error('Error placing bet', { error: err.message });
+    console.error('Bet error:', err.message, err.stack);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -348,18 +387,12 @@ app.post('/game/result', authenticateJWT, async (req, res) => {
     await req.jwtUser.save();
     res.json({ chips: req.jwtUser.chips });
   } catch (err) {
-    logger.error('Error updating game result', { error: err.message });
+    console.error('Game result error:', err.message, err.stack);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  logger.error('Server error', { path: req.path, error: err.message, stack: err.stack });
-  res.status(500).json({ error: 'Internal server error' });
-});
-
 // Start server
 app.listen(port, () => {
-  logger.info(`Server running on port ${port}`);
+  console.log(`Server running on port ${port}`);
 });
