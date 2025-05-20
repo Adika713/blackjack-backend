@@ -1,355 +1,430 @@
-const BACKEND_URL = 'https://blackjack-backend-aew7.onrender.com';
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const passport = require('passport');
+const DiscordStrategy = require('passport-discord').Strategy;
+const cookieParser = require('cookie-parser');
+const rateLimit = require('express-rate-limit');
+const crypto = require('crypto');
+const app = express();
+const port = process.env.PORT || 3000;
 
-// Navigation
-document.querySelectorAll('.nav-item').forEach(item => {
-  item.addEventListener('click', (e) => {
-    e.preventDefault();
-    const page = item.dataset.page;
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    document.getElementById(page).classList.add('active');
-    if (page === 'leaderboard') fetchLeaderboard(1);
-    if (page === 'profil') fetchProfile();
-    if (page === 'verseny') checkLoginForGame();
+// Set Mongoose strictQuery to suppress deprecation warning
+mongoose.set('strictQuery', true);
+
+// Middleware
+app.use(cors({
+  origin: ['https://blackjack-frontend-lilac.vercel.app', '*'], // Temporary wildcard for debugging
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
+}));
+app.use(express.json());
+app.use(cookieParser());
+
+// Log incoming requests
+app.use((req, res, next) => {
+  console.log('Request:', {
+    path: req.path,
+    method: req.method,
+    headers: req.headers,
+    cookies: req.cookies,
+    body: req.body,
+    ip: req.ip
   });
+  next();
 });
 
-// Handle query parameter
-function initializePage() {
-  const urlParams = new URLSearchParams(window.location.search);
-  const page = urlParams.get('page') || 'verseny';
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.getElementById(page).classList.add('active');
-  if (page === 'leaderboard') fetchLeaderboard(1);
-  if (page === 'profil') fetchProfile();
-  if (page === 'verseny') checkLoginForGame();
-  window.history.replaceState({}, document.title, window.location.pathname);
+// MongoDB connection with retry
+const mongoUri = process.env.MONGO_URI;
+if (!mongoUri) {
+  console.error('MONGO_URI environment variable is not set');
+  process.exit(1);
 }
 
-// Auth Popup
-const authPopup = document.getElementById('auth-popup');
-const authTitle = document.getElementById('auth-title');
-const authForm = document.getElementById('auth-form');
-const authSubmit = document.getElementById('auth-submit');
-const authError = document.getElementById('auth-error');
-const authSwitch = document.getElementById('auth-switch');
-const usernameInput = document.getElementById('username');
-const emailInput = document.getElementById('email');
-const passwordInput = document.getElementById('password');
-
-function showAuthPopup(isRegister) {
-  authPopup.classList.remove('hidden');
-  authTitle.textContent = isRegister ? 'Register' : 'Login';
-  authSubmit.textContent = isRegister ? 'Register' : 'Login';
-  usernameInput.parentElement.classList.toggle('hidden', !isRegister);
-  authSwitch.innerHTML = isRegister
-    ? `Already have an account? <a href="#" id="switch-to-login" class="text-blue-400">Login</a>`
-    : `No account? <a href="#" id="switch-to-register" class="text-blue-400">Register</a>`;
-  authError.classList.add('hidden');
-  document.body.style.overflow = 'hidden';
-  document.getElementById(isRegister ? 'switch-to-login' : 'switch-to-register').addEventListener('click', (e) => {
-    e.preventDefault();
-    showAuthPopup(!isRegister);
-  });
+async function connectToMongoDB(attempt = 1, maxAttempts = 5) {
+  try {
+    await mongoose.connect(mongoUri, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true
+    });
+    console.log('Connected to MongoDB, Database:', mongoose.connection.db.databaseName);
+    await User.collection.dropIndexes().catch(err => console.warn('No indexes to drop:', err.message));
+    await User.createIndexes();
+    console.log('User indexes created');
+  } catch (err) {
+    console.error(`MongoDB connection attempt ${attempt} failed:`, err.message, err.stack);
+    if (attempt < maxAttempts) {
+      console.log(`Retrying MongoDB connection in ${attempt * 3} seconds...`);
+      await new Promise(resolve => setTimeout(resolve, attempt * 3000));
+      return connectToMongoDB(attempt + 1, maxAttempts);
+    }
+    console.error('Max MongoDB connection attempts reached. Exiting.');
+    process.exit(1);
+  }
 }
 
-async function handleAuthSubmit(e) {
-  e.preventDefault();
-  const isRegister = authTitle.textContent === 'Register';
-  const username = usernameInput.value.trim();
-  const email = emailInput.value.trim();
-  const password = passwordInput.value.trim();
+connectToMongoDB();
 
-  // Client-side validation
-  if (isRegister && (!username || !/^[a-zA-Z0-9_]{3,20}$/.test(username))) {
-    authError.textContent = 'Username must be 3-20 characters, alphanumeric';
-    authError.classList.remove('hidden');
-    return;
+// User Schema
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true, match: /^[a-zA-Z0-9_]{3,20}$/ },
+  email: { type: String, required: true, unique: true, match: /^[^\s@]+@[^\s@]+\.[^\s@]+$/ },
+  password: { type: String, required: true },
+  discordId: { type: String, unique: true, sparse: true },
+  avatar: String,
+  chips: { type: Number, default: 1000 },
+  gamesPlayed: { type: Number, default: 0 },
+  wins: { type: Number, default: 0 },
+  losses: { type: Number, default: 0 },
+  totalBets: { type: Number, default: 0 }
+});
+
+// Indexes with case-insensitive collation
+userSchema.index({ username: 1 }, { unique: true, collation: { locale: 'en', strength: 2 } });
+userSchema.index({ email: 1 }, { unique: true, collation: { locale: 'en', strength: 2 } });
+userSchema.index({ discordId: 1 }, { unique: true, sparse: true });
+
+// Normalize username and email
+userSchema.pre('save', function(next) {
+  if (this.username) this.username = this.username.toLowerCase();
+  if (this.email) this.email = this.email.toLowerCase();
+  next();
+});
+
+const User = mongoose.model('User', userSchema);
+
+// Passport Discord Strategy
+passport.use(new DiscordStrategy({
+  clientID: process.env.DISCORD_CLIENT_ID,
+  clientSecret: process.env.DISCORD_CLIENT_SECRET,
+  callbackURL: 'https://blackjack-backend-aew7.onrender.com/auth/discord/callback',
+  scope: ['identify']
+}, async (accessToken, refreshToken, profile, done) => {
+  try {
+    console.log('Discord strategy processing for user:', profile.id);
+    return done(null, profile);
+  } catch (err) {
+    console.error('Discord strategy error:', err.message, err.stack);
+    return done(err, null);
   }
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    authError.textContent = 'Invalid email address';
-    authError.classList.remove('hidden');
-    return;
+}));
+
+passport.serializeUser((user, done) => {
+  console.log('Serializing user:', user.id);
+  done(null, user);
+});
+passport.deserializeUser((user, done) => {
+  console.log('Deserializing user:', user.id);
+  done(null, user);
+});
+
+// JWT Middleware
+const authenticateJWT = async (req, res, next) => {
+  const token = req.cookies.token;
+  if (!token) {
+    console.log('No JWT token found for path:', req.path);
+    return res.status(401).json({ error: 'Not authenticated' });
   }
-  if (!password || !/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d]{8,}$/.test(password)) {
-    authError.textContent = 'Password must be 8+ characters with at least 1 letter and 1 number';
-    authError.classList.remove('hidden');
-    return;
+  try {
+    if (!process.env.JWT_SECRET) {
+      console.error('JWT_SECRET not set');
+      return res.status(500).json({ error: 'Server configuration error' });
+    }
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.userId);
+    if (!user) {
+      console.log('User not found for ID:', decoded.userId);
+      return res.status(401).json({ error: 'User not found' });
+    }
+    req.jwtUser = user;
+    next();
+  } catch (err) {
+    console.error('JWT verification error:', req.path, err.message);
+    return res.status(401).json({ error: 'Invalid token' });
   }
+};
+
+// Rate limit for /balance
+const balanceLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: 'Too many requests to /balance'
+});
+
+// Health Check
+app.get('/health', (req, res) => {
+  const status = mongoose.connection.readyState === 1 ? 'ok' : 'db-error';
+  console.log('Health check:', { status, db: mongoose.connection.readyState });
+  res.json({ status, dbConnected: mongoose.connection.readyState === 1 });
+});
+
+// Routes
+app.get('/', (req, res) => {
+  console.log('Root endpoint accessed');
+  res.send('Blackjack Backend Running');
+});
+
+// Register
+app.post('/register', async (req, res) => {
+  let { username, email, password } = req.body;
+  console.log('Register attempt:', { username, email, headers: req.headers });
 
   try {
-    const endpoint = isRegister ? '/register' : '/login';
-    const body = isRegister ? { username, email, password } : { email, password };
-    console.log('Auth request:', { endpoint, body });
-    const response = await fetchWithTimeout(`${BACKEND_URL}${endpoint}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      credentials: 'include'
+    if (!username || !/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+      console.log('Invalid username:', username);
+      return res.status(400).json({ error: 'Username must be 3-20 characters, alphanumeric' });
+    }
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      console.log('Invalid email:', email);
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+    if (!password || !/^(?=.*[A-Za-z])(?=.*\d)[A-Za-z\d]{8,}$/.test(password)) {
+      console.log('Invalid password');
+      return res.status(400).json({ error: 'Password must be 8+ characters with 1 letter and 1 number' });
+    }
+
+    username = username.toLowerCase();
+    email = email.toLowerCase();
+    console.log('Normalized inputs:', { username, email });
+
+    if (mongoose.connection.readyState !== 1) {
+      console.error('MongoDB not connected');
+      return res.status(500).json({ error: 'Database connection error' });
+    }
+
+    if (!process.env.JWT_SECRET) {
+      console.error('JWT_SECRET not set');
+      return res.status(500).json({ error: 'Server configuration error' });
+    }
+
+    const usernameExists = await User.findOne({ username }).collation({ locale: 'en', strength: 2 });
+    if (usernameExists) {
+      console.log('Username exists:', username, 'Found:', usernameExists);
+      return res.status(400).json({ error: 'Username already exists' });
+    }
+
+    const emailExists = await User.findOne({ email }).collation({ locale: 'en', strength: 2 });
+    if (emailExists) {
+      console.log('Email exists:', email, 'Found:', emailExists);
+      return res.status(400).json({ error: 'Email already exists' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10).catch(err => {
+      throw new Error(`Password hashing failed: ${err.message}`);
     });
-    const data = await response.json();
-    console.log('Auth response:', { status: response.status, data });
-    if (!response.ok) throw new Error(data.error || 'Auth failed');
-    authPopup.classList.add('hidden');
-    document.body.style.overflow = '';
-    fetchProfile();
-    checkLoginForGame();
-    fetchBalance();
+    console.log('Creating user:', username);
+
+    const user = new User({ username, email, password: hashedPassword });
+    await user.save();
+
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '24h' });
+    console.log('User registered, setting token for:', username);
+
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none',
+      maxAge: 24 * 60 * 60 * 1000
+    });
+    res.json({
+      message: 'Registered and logged in',
+      user: { username, email, chips: user.chips }
+    });
   } catch (err) {
-    console.error('Auth error:', {
+    console.error('Register error:', {
       message: err.message,
+      stack: err.stack,
+      code: err.code,
       name: err.name,
-      stack: err.stack
+      keyPattern: err.keyPattern,
+      keyValue: err.keyValue
     });
-    authError.textContent = err.message === 'Failed to fetch' ? 'Cannot reach server. Please try again.' : err.message;
-    authError.classList.remove('hidden');
-  }
-}
-
-authSubmit.addEventListener('click', handleAuthSubmit);
-
-// Blackjack Game
-const suits = ['♠', '♣', '♥', '♦'];
-const values = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
-let deck = [];
-let playerHand = [];
-let dealerHand = [];
-let currentBet = 0;
-let gameState = 'idle';
-
-function createDeck() {
-  deck = [];
-  for (let i = 0; i < 6; i++) {
-    for (let suit of suits) {
-      for (let value of values) {
-        deck.push({ suit, value });
-      }
+    if (err.name === 'MongoServerError' && err.code === 11000) {
+      const field = err.keyPattern ? Object.keys(err.keyPattern)[0] : 'unknown';
+      console.log('Duplicate key error:', { field, value: err.keyValue });
+      return res.status(400).json({ error: `${field.charAt(0).toUpperCase() + field.slice(1)} already exists` });
     }
-  }
-  deck = deck.sort(() => Math.random() - 0.5);
-}
-
-function getCardValue(card) {
-  if (['J', 'Q', 'K'].includes(card.value)) return 10;
-  if (card.value === 'A') return 11;
-  return parseInt(card.value);
-}
-
-function calculateHandValue(hand) {
-  let value = 0;
-  let aces = 0;
-  for (let card of hand) {
-    if (card.value === 'A') {
-      aces++;
-    } else {
-      value += getCardValue(card);
+    if (err.name === 'ValidationError') {
+      return res.status(400).json({ error: `Invalid user data: ${err.message}` });
     }
+    res.status(500).json({ error: 'Server error' });
   }
-  for (let i = 0; i < aces; i++) {
-    if (value + 11 <= 21) {
-      value += 11;
-    } else {
-      value += 1;
-    }
-  }
-  return value;
-}
+});
 
-function renderHand(hand, elementId, hideFirst = false) {
-  const element = document.getElementById(elementId);
-  element.innerHTML = '';
-  hand.forEach((card, index) => {
-    if (hideFirst && index === 0) {
-      element.innerHTML += '<div class="card">?</div>';
-    } else {
-      const color = ['♥', '♦'].includes(card.suit) ? 'red' : 'black';
-      element.innerHTML += `<div class="card ${color}">${card.value}${card.suit}</div>`;
+// Login
+app.post('/login', async (req, res) => {
+  let { email, password } = req.body;
+  console.log('Login attempt:', { email });
+  try {
+    email = email.toLowerCase();
+    const user = await User.findOne({ email }).collation({ locale: 'en', strength: 2 });
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      console.log('Invalid email or password:', { email });
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    if (!process.env.JWT_SECRET) {
+      console.error('JWT_SECRET not set');
+      return res.status(500).json({ error: 'Server configuration error' });
+    }
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '24h' });
+    console.log('User logged in, setting token for:', user.username);
+    res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'none', maxAge: 24 * 60 * 60 * 1000 });
+    res.json({ message: 'Logged in', user: { username: user.username, email, chips: user.chips } });
+  } catch (err) {
+    console.error('Login error:', err.message, err.stack);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Check Authentication
+app.get('/check-auth', authenticateJWT, (req, res) => {
+  console.log('Check-auth for user:', req.jwtUser.username);
+  res.json({
+    authenticated: true,
+    user: {
+      username: req.jwtUser.username,
+      email: req.jwtUser.email,
+      discordConnected: !!req.jwtUser.discordId
     }
   });
-}
-
-async function checkLoginForGame() {
-  try {
-    const response = await fetchWithTimeout(`${BACKEND_URL}/check-auth`, { credentials: 'include' });
-    const data = await response.json();
-    console.log('Check Auth:', data);
-    if (data.authenticated && data.user.discordConnected) {
-      document.getElementById('login-message').classList.add('hidden');
-      document.getElementById('game-content').classList.remove('hidden');
-      fetchBalance();
-    } else {
-      document.getElementById('login-message').classList.remove('hidden');
-      document.getElementById('game-content').classList.add('hidden');
-    }
-  } catch (err) {
-    console.error('Check Login Error:', err);
-    document.getElementById('login-message').classList.remove('hidden');
-    document.getElementById('game-content').classList.add('hidden');
-  }
-}
-
-document.getElementById('deal-btn').addEventListener('click', async () => {
-  if (gameState !== 'idle') return;
-  const bet = parseInt(document.getElementById('bet-amount').value);
-  if (!bet || bet <= 0) {
-    document.getElementById('game-status').innerText = 'Invalid bet amount';
-    return;
-  }
-  try {
-    const response = await fetch(`${BACKEND_URL}/game/bet`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bet }),
-      credentials: 'include'
-    });
-    if (!response.ok) throw new Error(`Bet failed: ${await response.json().error}`);
-    const data = await response.json();
-    currentBet = bet;
-    gameState = 'playing';
-    createDeck();
-    playerHand = [deck.pop(), deck.pop()];
-    dealerHand = [deck.pop(), deck.pop()];
-    renderHand(playerHand, 'player-hand');
-    renderHand(dealerHand, 'dealer-hand', true);
-    document.getElementById('game-actions').classList.remove('hidden');
-    document.getElementById('game-status').innerText = '';
-    fetchBalance();
-    if (dealerHand[1].value === 'A') {
-      document.getElementById('insurance-btn').classList.remove('hidden');
-    }
-    if (playerHand[0].value === playerHand[1].value) {
-      document.getElementById('split-btn').classList.remove('hidden');
-    }
-  } catch (err) {
-    console.error('Bet Error:', err);
-    document.getElementById('game-status').innerText = err.message;
-  }
 });
 
-// Game actions (to be completed)
-document.getElementById('hit-btn').addEventListener('click', () => {
-  // Implement hit logic
+// Connect Discord
+app.get('/auth/discord', authenticateJWT, (req, res, next) => {
+  console.log('Initiating Discord auth for user:', req.jwtUser.username);
+  const state = crypto.randomBytes(16).toString('hex');
+  const token = req.cookies.token;
+  console.log('Discord auth, state:', state, 'User ID:', req.jwtUser._id);
+  passport.authenticate('discord', {
+    state: `${state}|${token}`
+  })(req, res, next);
 });
 
-document.getElementById('stay-btn').addEventListener('click', () => {
-  // Implement stay logic
+app.get('/auth/discord/callback', (req, res, next) => {
+  console.log('Callback received, Query:', req.query, 'Cookies:', req.cookies);
+  passport.authenticate('discord', { failureRedirect: '/' }, async (err, user, info) => {
+    if (err) {
+      console.error('Passport authentication error:', err.message, err.stack);
+      return res.status(500).json({ error: 'Authentication error' });
+    }
+    if (!user) {
+      console.log('Passport authentication failed:', info, 'Query:', req.query);
+      return res.redirect('/');
+    }
+    try {
+      console.log('Discord callback, User:', user.id);
+      const state = req.query.state || '';
+      const [receivedState, token] = state.split('|');
+      if (!receivedState || !token) {
+        console.log('Invalid state or token in callback');
+        return res.status(401).json({ error: 'Invalid state or token' });
+      }
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const dbUser = await User.findById(decoded.userId);
+      if (!dbUser) {
+        console.log('User not found for ID:', decoded.userId);
+        return res.status(401).json({ error: 'User not found' });
+      }
+      const discordId = user.id;
+      const existingUser = await User.findOne({ discordId });
+      if (existingUser && existingUser._id.toString() !== dbUser._id.toString()) {
+        return res.status(400).json({ error: 'Discord account already linked to another user' });
+      }
+      dbUser.discordId = discordId;
+      dbUser.avatar = dbUser.avatar || `https://cdn.discordapp.com/avatars/${discordId}/${user.avatar}.png`;
+      await dbUser.save();
+      console.log(`Discord connected for user: ${dbUser.username}, discordId: ${discordId}`);
+      res.redirect('https://blackjack-frontend-lilac.vercel.app/?page=profil');
+    } catch (err) {
+      console.error('Discord callback error:', err.message, err.stack);
+      res.status(500).json({ error: 'Server error' });
+    }
+  })(req, res, next);
+});
+
+// User Info
+app.get('/profile', authenticateJWT, (req, res) => {
+  console.log('Profile accessed for user:', req.jwtUser.username);
+  res.json({
+    username: req.jwtUser.username,
+    email: req.jwtUser.email,
+    avatar: req.jwtUser.avatar,
+    chips: req.jwtUser.chips,
+    gamesPlayed: req.jwtUser.gamesPlayed,
+    wins: req.jwtUser.wins,
+    losses: req.jwtUser.losses,
+    totalBets: req.jwtUser.totalBets,
+    discordConnected: !!req.jwtUser.discordId
+  });
 });
 
 // Leaderboard
-async function fetchLeaderboard(page) {
+app.get('/leaderboard', async (req, res) => {
   try {
-    const response = await fetchWithTimeout(`${BACKEND_URL}/leaderboard?page=${page}`, { credentials: 'include' });
-    if (!response.ok) throw new Error(`Leaderboard fetch failed: ${response.status}`);
-    const data = await response.json();
-    const tbody = document.getElementById('leaderboard-body');
-    tbody.innerHTML = '';
-    data.users.forEach((user, index) => {
-      const rank = (data.page - 1) * 20 + index + 1;
-      tbody.innerHTML += `
-        <tr>
-          <td class="p-2">${rank}</td>
-          <td class="p-2">${user.username}</td>
-          <td class="p-2">${user.chips}</td>
-          <td class="p-2">${user.gamesPlayed}</td>
-        </tr>
-      `;
-    });
-    const pagination = document.getElementById('pagination');
-    pagination.innerHTML = '';
-    for (let i = 1; i <= data.pages; i++) {
-      pagination.innerHTML += `<button class="mx-1 p-2 ${i === data.page ? 'bg-blue-600' : 'bg-gray-600'} hover:bg-blue-700 rounded" onclick="fetchLeaderboard(${i})">${i}</button>`;
-    }
+    const page = parseInt(req.query.page) || 1;
+    const limit = 20;
+    const skip = (page - 1) * limit;
+    const users = await User.find()
+      .sort({ chips: -1 })
+      .skip(skip)
+      .limit(limit)
+      .select('username chips gamesPlayed');
+    const total = await User.countDocuments();
+    res.json({ users, total, page, pages: Math.ceil(total / limit) });
   } catch (err) {
-    console.error('Leaderboard Error:', err);
-    document.getElementById('leaderboard-body').innerHTML = '<tr><td colspan="4">Error loading leaderboard</td></tr>';
+    console.error('Leaderboard error:', err.message, err.stack);
+    res.status(500).json({ error: 'Server error' });
   }
-}
-
-// Profile
-async function fetchProfile() {
-  const content = document.getElementById('profile-content');
-  try {
-    const response = await fetchWithTimeout(`${BACKEND_URL}/profile`, { credentials: 'include' });
-    console.log('Profile Fetch Status:', response.status);
-    if (response.ok) {
-      const user = await response.json();
-      content.innerHTML = `
-        <div class="profile-card">
-          <img src="${user.avatar || 'https://via.placeholder.com/100'}" class="rounded-full w-32 h-32 mb-4 mx-auto">
-          <h3 class="text-2xl mb-2">${user.username}</h3>
-          <p class="text-lg mb-1">Email: ${user.email}</p>
-          <p class="text-lg mb-1">Chips: ${user.chips}</p>
-          <p class="text-lg mb-1">Games Played: ${user.gamesPlayed}</p>
-          <p class="text-lg mb-1">Wins: ${user.wins}</p>
-          <p class="text-lg mb-1">Losses: ${user.losses}</p>
-          <p class="text-lg mb-1">Total Bets: ${user.totalBets}</p>
-          <div class="${user.discordConnected ? 'discord-connected' : 'discord-login'} mt-4">
-            ${user.discordConnected
-              ? '<span class="bg-[#5865F2] text-white p-2 rounded flex items-center"><i class="fab fa-discord mr-2"></i>Connected</span>'
-              : `<a href="${BACKEND_URL}/auth/discord" class="bg-[#5865F2] text-white p-2 rounded flex items-center"><i class="fab fa-discord mr-2"></i>Connect Discord</a>`}
-          </div>
-        </div>
-      `;
-      fetchBalance();
-    } else {
-      showAuthPopup(true);
-    }
-  } catch (err) {
-    console.error('Profile Error:', err);
-    showAuthPopup(true);
-  }
-}
+});
 
 // Balance
-async function fetchBalance() {
+app.get('/balance', balanceLimiter, authenticateJWT, (req, res) => {
+  console.log('Balance accessed for user:', req.jwtUser.username);
+  res.json({ chips: req.jwtUser.chips });
+});
+
+// Blackjack Game
+app.post('/game/bet', authenticateJWT, async (req, res) => {
+  if (!req.jwtUser.discordId) return res.status(403).json({ error: 'Connect Discord to play' });
+  const { bet } = req.body;
+  if (!bet || bet <= 0 || bet > req.jwtUser.chips) {
+    return res.status(400).json({ error: 'Invalid bet' });
+  }
   try {
-    const response = await fetchWithTimeout(`${BACKEND_URL}/balance`, { credentials: 'include' });
-    console.log('Balance Fetch Status:', response.status);
-    if (response.ok) {
-      const data = await response.json();
-      document.getElementById('chip-count').innerText = data.chips;
+    req.jwtUser.chips -= bet;
+    req.jwtUser.gamesPlayed += 1;
+    req.jwtUser.totalBets += bet;
+    await req.jwtUser.save();
+    res.json({ chips: req.jwtUser.chips, bet });
+  } catch (err) {
+    console.error('Bet error:', err.message, err.stack);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Update game result
+app.post('/game/result', authenticateJWT, async (req, res) => {
+  if (!req.jwtUser.discordId) return res.status(403).json({ error: 'Connect Discord to play' });
+  const { won, chipsWon } = req.body;
+  try {
+    if (won) {
+      req.jwtUser.wins += 1;
+      req.jwtUser.chips += chipsWon;
     } else {
-      document.getElementById('chip-count').innerText = '0';
+      req.jwtUser.losses += 1;
     }
+    await req.jwtUser.save();
+    res.json({ chips: req.jwtUser.chips });
   } catch (err) {
-    console.error('Balance Error:', err);
-    document.getElementById('chip-count').innerText = 'Error';
+    console.error('Game result error:', err.message, err.stack);
+    res.status(500).json({ error: 'Server error' });
   }
-}
+});
 
-// Fetch with timeout
-async function fetchWithTimeout(url, options = {}) {
-  const { timeout = 30000, ...fetchOptions } = options; // Increased to 30s
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
-  try {
-    const response = await fetch(url, { ...fetchOptions, signal: controller.signal });
-    clearTimeout(id);
-    return response;
-  } catch (error) {
-    clearTimeout(id);
-    console.error('Fetch failed:', { url, error: error.message, name: error.name });
-    throw error;
-  }
-}
-
-// Initialize
-async function initialize() {
-  try {
-    const response = await fetchWithTimeout(`${BACKEND_URL}/check-auth`, { credentials: 'include' });
-    if (response.ok) {
-      const data = await response.json();
-      if (data.authenticated) {
-        initializePage();
-        fetchBalance();
-        return;
-      }
-    }
-    showAuthPopup(true);
-  } catch (err) {
-    console.error('Init Error:', err);
-    showAuthPopup(true);
-  }
-}
-
-initialize();
-setInterval(fetchBalance, 5000);
+// Start server
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
