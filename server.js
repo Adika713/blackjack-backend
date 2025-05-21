@@ -14,9 +14,21 @@ const port = process.env.PORT || 3000;
 // Set Mongoose strictQuery to suppress deprecation warning
 mongoose.set('strictQuery', true);
 
-// Middleware
+// Middleware to ensure CORS headers are applied to all responses
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', 'https://blackjack-frontend-lilac.vercel.app');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cookie');
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
+
+// CORS Middleware (apply after the custom CORS middleware)
 app.use(cors({
-  origin: ['https://blackjack-frontend-lilac.vercel.app', '*'], // Temporary wildcard for debugging
+  origin: ['https://blackjack-frontend-lilac.vercel.app'], // Removed wildcard
   credentials: true,
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
@@ -384,6 +396,14 @@ app.get('/leaderboard', async (req, res) => {
 app.get('/balance', balanceLimiter, authenticateJWT, (req, res) => {
   console.log('Balance accessed for user:', req.jwtUser.username);
   res.json({ chips: req.jwtUser.chips });
+});
+
+// Warn if /balance is accessed without a token (before authenticateJWT middleware)
+app.use('/balance', (req, res, next) => {
+  if (!req.cookies.token) {
+    console.warn('Attempt to access /balance without a token. Ensure frontend only calls this after login.');
+  }
+  next();
 });
 
 // Blackjack Game
