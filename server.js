@@ -63,9 +63,35 @@ async function connectToMongoDB(attempt = 1, maxAttempts = 5) {
       useUnifiedTopology: true
     });
     console.log('Connected to MongoDB, Database:', mongoose.connection.db.databaseName);
-    await User.collection.dropIndexes().catch(err => console.warn('No indexes to drop:', err.message));
-    await User.createIndexes();
-    console.log('User indexes created');
+
+    // Safely manage indexes
+    try {
+      // Check for existing indexes
+      const existingIndexes = await User.collection.indexes();
+      console.log('Existing indexes:', existingIndexes);
+
+      // Drop the conflicting index if it exists without the correct collation
+      const usernameIndex = existingIndexes.find(index => index.name === 'username_1');
+      if (usernameIndex && !usernameIndex.collation) {
+        console.log('Dropping conflicting username index without collation:', usernameIndex);
+        await User.collection.dropIndex('username_1');
+      }
+
+      // Drop the email index if it exists without the correct collation
+      const emailIndex = existingIndexes.find(index => index.name === 'email_1');
+      if (emailIndex && !emailIndex.collation) {
+        console.log('Dropping conflicting email index without collation:', emailIndex);
+        await User.collection.dropIndex('email_1');
+      }
+
+      // Recreate indexes as defined in the schema
+      await User.createIndexes();
+      console.log('User indexes created successfully');
+    } catch (indexError) {
+      console.error('Failed to manage indexes:', indexError.message, indexError.stack);
+      // Continue running the server despite index creation failure
+      console.warn('Proceeding without updating indexes. This may cause issues with unique constraints.');
+    }
   } catch (err) {
     console.error(`MongoDB connection attempt ${attempt} failed:`, err.message, err.stack);
     if (attempt < maxAttempts) {
@@ -73,8 +99,8 @@ async function connectToMongoDB(attempt = 1, maxAttempts = 5) {
       await new Promise(resolve => setTimeout(resolve, attempt * 3000));
       return connectToMongoDB(attempt + 1, maxAttempts);
     }
-    console.error('Max MongoDB connection attempts reached. Exiting.');
-    process.exit(1);
+    console.error('Max MongoDB connection attempts reached. Server will continue to run without DB.');
+    // Instead of exiting, allow the server to continue (without DB functionality)
   }
 }
 
@@ -178,6 +204,11 @@ app.post('/register', async (req, res) => {
   console.log('Register attempt:', { username, email, headers: req.headers });
 
   try {
+    if (mongoose.connection.readyState !== 1) {
+      console.error('MongoDB not connected during register attempt');
+      return res.status(500).json({ error: 'Database connection error' });
+    }
+
     if (!username || !/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
       console.log('Invalid username:', username);
       return res.status(400).json({ error: 'Username must be 3-20 characters, alphanumeric' });
@@ -194,11 +225,6 @@ app.post('/register', async (req, res) => {
     username = username.toLowerCase();
     email = email.toLowerCase();
     console.log('Normalized inputs:', { username, email });
-
-    if (mongoose.connection.readyState !== 1) {
-      console.error('MongoDB not connected');
-      return res.status(500).json({ error: 'Database connection error' });
-    }
 
     if (!process.env.JWT_SECRET) {
       console.error('JWT_SECRET not set');
@@ -264,6 +290,11 @@ app.post('/login', async (req, res) => {
   let { email, password } = req.body;
   console.log('Login attempt:', { email });
   try {
+    if (mongoose.connection.readyState !== 1) {
+      console.error('MongoDB not connected during login attempt');
+      return res.status(500).json({ error: 'Database connection error' });
+    }
+
     email = email.toLowerCase();
     const user = await User.findOne({ email }).collation({ locale: 'en', strength: 2 });
     if (!user || !(await bcrypt.compare(password, user.password))) {
@@ -369,6 +400,11 @@ app.get('/profile', authenticateJWT, (req, res) => {
 // Leaderboard
 app.get('/leaderboard', async (req, res) => {
   try {
+    if (mongoose.connection.readyState !== 1) {
+      console.error('MongoDB not connected during leaderboard request');
+      return res.status(500).json({ error: 'Database connection error' });
+    }
+
     const page = parseInt(req.query.page) || 1;
     const limit = 20;
     const skip = (page - 1) * limit;
@@ -407,6 +443,11 @@ app.post('/game/bet', authenticateJWT, async (req, res) => {
     return res.status(400).json({ error: 'Invalid bet' });
   }
   try {
+    if (mongoose.connection.readyState !== 1) {
+      console.error('MongoDB not connected during game bet');
+      return res.status(500).json({ error: 'Database connection error' });
+    }
+
     req.jwtUser.chips -= bet;
     req.jwtUser.gamesPlayed += 1;
     req.jwtUser.totalBets += bet;
@@ -423,6 +464,11 @@ app.post('/game/result', authenticateJWT, async (req, res) => {
   if (!req.jwtUser.discordId) return res.status(403).json({ error: 'Connect Discord to play' });
   const { won, chipsWon } = req.body;
   try {
+    if (mongoose.connection.readyState !== 1) {
+      console.error('MongoDB not connected during game result');
+      return res.status(500).json({ error: 'Database connection error' });
+    }
+
     if (won) {
       req.jwtUser.wins += 1;
       req.jwtUser.chips += chipsWon;
