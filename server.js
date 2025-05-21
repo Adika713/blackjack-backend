@@ -28,7 +28,7 @@ app.use((req, res, next) => {
 
 // CORS Middleware (apply after the custom CORS middleware)
 app.use(cors({
-  origin: ['https://blackjack-frontend-lilac.vercel.app'], // Removed wildcard
+  origin: ['https://blackjack-frontend-lilac.vercel.app'],
   credentials: true,
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Cookie']
@@ -158,13 +158,6 @@ const authenticateJWT = async (req, res, next) => {
     return res.status(401).json({ error: 'Invalid token' });
   }
 };
-
-// Rate limit for /balance
-const balanceLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: 'Too many requests to /balance'
-});
 
 // Health Check
 app.get('/health', (req, res) => {
@@ -392,8 +385,8 @@ app.get('/leaderboard', async (req, res) => {
   }
 });
 
-// Balance
-app.get('/balance', balanceLimiter, authenticateJWT, (req, res) => {
+// Balance (removed rate limiter)
+app.get('/balance', authenticateJWT, (req, res) => {
   console.log('Balance accessed for user:', req.jwtUser.username);
   res.json({ chips: req.jwtUser.chips });
 });
